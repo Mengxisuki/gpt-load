@@ -5,6 +5,7 @@
 - 产品范围：[docs/memory/product.md](docs/memory/product.md)。开始任务先读，历史结论以当前源码与实际验证为准。
 - 重要取舍：[docs/memory/decisions.md](docs/memory/decisions.md)。仅追加已落地事实。
 - 排障经验：[docs/memory/lessons.md](docs/memory/lessons.md)。排障或改部署前检索。
+- 私有账号执行：[docs/hosting-api.md](docs/hosting-api.md)。修改挂靠、凭据或调度前读取。
 - 部署、分支与验证：[deploy/oak/README.md](deploy/oak/README.md)。生产暂时仅回环访问。
 
 `upstream-main` 保持官方纯源码；定制、部署与 CI 文件只进入 `oak`，推送会触发自动发布。不得将管理密钥、渠道凭据、数据库、运行日志或本地构建产物提交到 Git。

@@ -52,6 +52,14 @@ func (s *Service) ConsumeCredentialResetCredit(
 	credentialID uint,
 	idempotencyKey string,
 ) (ResetCreditConsumeResponse, error) {
+	// 管理员和 Oak 共用同一互斥边界，解绑不能删除正在消费的凭据。
+	s.hostingMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.hostingMu.Unlock()
+		}
+	}()
 	if groupID == 0 || credentialID == 0 {
 		return ResetCreditConsumeResponse{}, app_errors.ErrValidation
 	}
@@ -104,6 +112,10 @@ func (s *Service) ConsumeCredentialResetCredit(
 	if err != nil {
 		return ResetCreditConsumeResponse{}, err
 	}
+	// prepared 已持久化后，解绑由操作状态阻止；不锁住后续只读观测。
+	// 同 UUID 的重放必须能在后台刷新进行中立即读取成功结果。
+	s.hostingMu.Unlock()
+	locked = false
 	if replayed {
 		return s.replayResetCreditOperation(ctx, groupID, credentialID, operation)
 	}

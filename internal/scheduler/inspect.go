@@ -163,11 +163,8 @@ func evaluateTargets(
 		if clientSelectedLiveModel && query.externalModel != nil {
 			decision.target.UpstreamModelID = *query.externalModel
 		}
-		groupFiltered := false
-		if len(query.accessKey.Filters.Groups) > 0 {
-			_, allowed := query.accessKey.Filters.Groups[route.GroupID]
-			groupFiltered = !allowed
-		}
+		// 普通空过滤 Key 也必须经过私有账号归属校验。
+		groupFiltered := !snapshot.AllowsGroup(query.accessKey, route.GroupID)
 		switch {
 		case !requirementOK:
 			decision.included = false
@@ -273,14 +270,6 @@ func advisorModelsAllowed(models []state.ModelConfig, query normalizedQuery) boo
 		}
 	}
 	return true
-}
-
-func accessKeyAllowsGroup(accessKey state.AccessKeyView, groupID uint) bool {
-	if len(accessKey.Filters.Groups) == 0 {
-		return true
-	}
-	_, allowed := accessKey.Filters.Groups[groupID]
-	return allowed
 }
 
 func effectiveWeight(groupManual, credentialManual *int) int64 {

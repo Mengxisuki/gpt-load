@@ -185,6 +185,11 @@ const lastActive = computed(() =>
         }}</AppBadge
         ><span>{{ group.channelName }}</span>
       </div>
+      <!-- 仅显示 Oak 不透明引用，避免在管理列表暴露完整邮箱。 -->
+      <div v-if="group.category === 'hosting'">
+        {{ t('groups.category.hosting') }} · {{ group.ownerRef }} ·
+        {{ t(`groups.hostingState.${group.hostingStatus}`) }}
+      </div>
       <div class="modern-group-mobile-facts">
         <span
           >{{ n(group.credentials.available) }}/{{ n(group.credentials.total) }}
@@ -221,6 +226,11 @@ const lastActive = computed(() =>
               t(`groups.row.state.${state}`)
             }}</AppBadge>
           </div>
+          <!-- 分类只读；凭据增删和所有者迁移须走受控挂靠接口。 -->
+          <div v-if="group.category === 'hosting'">
+            {{ t('groups.category.hosting') }} · {{ group.ownerRef }} ·
+            {{ t(`groups.hostingState.${group.hostingStatus}`) }}
+          </div>
           <div class="modern-group-secondary modern-group-connection">
             <AppBadge
               :icon="group.connectionType === 'subscription' ? UserRound : KeyRound"
@@ -247,7 +257,7 @@ const lastActive = computed(() =>
               size="xs"
               variant="ghost"
               icon-only
-              :disabled="Boolean(pending)"
+              :disabled="Boolean(pending) || group.category === 'hosting'"
               as-child
             >
               <RouterLink
@@ -334,7 +344,7 @@ const lastActive = computed(() =>
             :model-value="enabledOverride ?? group.enabled"
             :label="t('groups.toggle', { name: group.name })"
             :loading="pending === 'toggle'"
-            :disabled="Boolean(pending)"
+            :disabled="Boolean(pending) || group.category === 'hosting'"
             @update:model-value="emit('toggle', $event)"
           />
         </div>

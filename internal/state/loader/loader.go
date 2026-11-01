@@ -76,6 +76,8 @@ func NewWithCredentialValidation(
 }
 
 type compileRows struct {
+	// 私有授权与组配置在同一快照读取，避免短暂公共可见。
+	hosting              []models.HostingBinding
 	proxies              []models.Proxy
 	settings             []models.SystemSetting
 	groups               []models.Group
@@ -295,6 +297,9 @@ func (l *Loader) validatePersistedCredentials(
 func queryCompileRows(ctx context.Context, db *gorm.DB) (compileRows, error) {
 	db = db.WithContext(ctx)
 	var rows compileRows
+	if err := db.Where("status <> ?", "deleted").Find(&rows.hosting).Error; err != nil {
+		return compileRows{}, fmt.Errorf("query hosting bindings: %w", err)
+	}
 	if err := db.Order("id ASC").Find(&rows.proxies).Error; err != nil {
 		return compileRows{}, fmt.Errorf("query proxy catalog: %w", err)
 	}
@@ -326,6 +331,9 @@ func queryCompileRows(ctx context.Context, db *gorm.DB) (compileRows, error) {
 	}
 	if err := db.Order("model_hash ASC").Find(&rows.clientModelOverrides).Error; err != nil {
 		return compileRows{}, fmt.Errorf("query client model overrides: %w", err)
+	}
+	if err := validateHostingRows(rows); err != nil {
+		return compileRows{}, err
 	}
 	return rows, nil
 }
@@ -768,6 +776,13 @@ func mapSystemAndGroups(
 			return state.CompileInput{}, fmt.Errorf("decode system setting %q: %w", row.Key, err)
 		}
 		input.SystemSettings[row.Key] = value
+	}
+	input.HostingGroups = make(map[uint]uint, len(rows.hosting))
+	for _, binding := range rows.hosting {
+		input.HostingGroups[binding.GroupID] = 0
+		if binding.Status == "active" {
+			input.HostingGroups[binding.GroupID] = binding.AccessKeyID
+		}
 	}
 	for _, row := range rows.groups {
 		var storedModels []modelDTO

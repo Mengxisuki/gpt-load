@@ -53,11 +53,9 @@ func Candidates(snapshot *state.ConfigSnapshot, key state.AccessKeyView) []strin
 			}
 		}
 		for _, target := range targets {
-			if len(key.Filters.Groups) == 0 {
-				visible[name] = struct{}{}
-				break
-			}
-			if _, allowed := key.Filters.Groups[target.GroupID]; allowed {
+			// Codex 专用目录也应用私有归属，空过滤不开放用户挂靠资源。
+			// 自动模型仍通过调度器验证候选，避免目录与实际执行产生分歧。
+			if snapshot.AllowsGroup(key, target.GroupID) {
 				visible[name] = struct{}{}
 				break
 			}

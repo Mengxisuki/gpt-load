@@ -12,6 +12,7 @@ import (
 
 	"gpt-load/internal/channel/modules"
 	"gpt-load/internal/channel/spec"
+	providerobservation "gpt-load/internal/subscription/providers/observation"
 	subscriptionruntime "gpt-load/internal/subscription/runtime"
 )
 
@@ -189,6 +190,34 @@ func (*codexDriver) Observe(ctx context.Context, credential subscriptionruntime.
 	normalized, err := NormalizeQuota(observed.Payload, detailsPayload)
 	if err != nil {
 		return subscriptionruntime.Observation{}, fmt.Errorf("%w: %v", subscriptionruntime.ErrObservationPayloadInvalid, err)
+	}
+	// 主额度与卡片详情来自不同接口，成功率和更新时间可能不同。
+	// 主接口失败仍直接报错；卡详情失败可保留已成功的主额度。
+	// 只有主响应带数量时标记 partial，不能自行补一个零数量。
+	// 详情解析成功且明确包含列表，才能宣称卡信息 fresh。
+	// 空列表同样是有效结果，表示已观测到零张卡。
+	// 列表缺失或格式错误不等价于空列表，必须保留不可用状态。
+	// 错误码不携带原厂正文，避免把账号或令牌信息带入摘要。
+	// 此状态随归一化快照保存，下次读取不需要再次请求详情。
+	// 正式额度观测的状态不替代这个子状态，前端要分别呈现。
+	// 主额度成功不能掩盖卡片详情失败，独立标记可用性及观测时间。
+	var snapshot quotaSnapshot
+	if err := json.Unmarshal(normalized, &snapshot); err != nil {
+		return subscriptionruntime.Observation{}, err
+	}
+	cardState := &providerobservation.ResetCreditObservation{State: "unavailable", ErrorCode: "RESET_CREDIT_DETAILS_UNAVAILABLE"}
+	if snapshot.ResetCreditsAvailable != nil {
+		cardState.State = "partial"
+	}
+	_, _, present, detailParseErr := normalizeResetCreditDetails(detailsPayload)
+	if detailErr == nil && detailParseErr == nil && present {
+		observedAt := time.Now().UnixMilli()
+		cardState.State, cardState.ErrorCode, cardState.ObservedAtMS = "fresh", "", &observedAt
+	}
+	snapshot.ResetCreditObservation = cardState
+	normalized, err = json.Marshal(snapshot)
+	if err != nil {
+		return subscriptionruntime.Observation{}, err
 	}
 	return subscriptionruntime.Observation{Payload: normalized, Header: observed.Header.Clone(), QuotaObserved: true}, nil
 }

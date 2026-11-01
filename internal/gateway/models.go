@@ -104,7 +104,7 @@ func collectVisibleModelIDs(
 						continue
 					}
 				}
-				if !anyVisibleTarget(targets, accessKey.Filters.Groups) {
+				if !anyAuthorizedTarget(snapshot, targets, accessKey) {
 					continue
 				}
 				visible[modelID] = struct{}{}
@@ -168,21 +168,6 @@ func modelListProtocols(value protocol.Protocol) []protocol.Protocol {
 		return []protocol.Protocol{protocol.Gemini, protocol.GeminiEmbeddings}
 	}
 	return []protocol.Protocol{value}
-}
-
-func anyVisibleTarget(targets []state.RouteTarget, groups map[uint]struct{}) bool {
-	if len(targets) == 0 {
-		return false
-	}
-	if len(groups) == 0 {
-		return true
-	}
-	for _, target := range targets {
-		if _, ok := groups[target.GroupID]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 func (handler *Handler) writeVisibleModelList(
@@ -284,4 +269,15 @@ func marshalModelList(value protocol.Protocol, ids []string) ([]byte, error) {
 		}
 		return json.Marshal(openAIModelList{Object: "list", Data: data})
 	}
+}
+
+// 目录与执行共用组权限，防止私有模型通过空过滤 Key 泄露。
+// 同名公共模型仍可见，但不会因此获得私有账号执行权限。
+func anyAuthorizedTarget(snapshot *state.ConfigSnapshot, targets []state.RouteTarget, key state.AccessKeyView) bool {
+	for _, target := range targets {
+		if snapshot.AllowsGroup(key, target.GroupID) {
+			return true
+		}
+	}
+	return false
 }

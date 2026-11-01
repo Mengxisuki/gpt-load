@@ -73,11 +73,22 @@ type CreditSummary struct {
 	ObservedAtMS *int64 `json:"observed_at_ms,omitempty"`
 }
 
+// ResetCreditObservation 将重置卡详情的健康与主额度观测区分。
+// 数量可来自主接口，但详情失败不能被 fresh 主额度掩盖。
+// 缺失时间表示没有可靠卡详情观测，不能显示为零张。
+type ResetCreditObservation struct {
+	State        string `json:"state"`
+	ObservedAtMS *int64 `json:"observed_at_ms,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+}
+
 type Snapshot struct {
-	Plan                  PlanSummary     `json:"plan_summary"`
-	Account               *AccountSummary `json:"account_summary,omitempty"`
-	QuotaWindows          []QuotaWindow   `json:"quota_windows"`
-	Credits               *CreditSummary  `json:"credits,omitempty"`
-	ResetCreditsAvailable *int64          `json:"reset_credits_available,omitempty"`
-	ResetCredits          []ResetCredit   `json:"reset_credits,omitempty"`
+	// 卡片子状态与主额度分别保存，不把未知数量转换为零。
+	ResetCreditObservation *ResetCreditObservation `json:"reset_credit_observation,omitempty"`
+	Plan                   PlanSummary             `json:"plan_summary"`
+	Account                *AccountSummary         `json:"account_summary,omitempty"`
+	QuotaWindows           []QuotaWindow           `json:"quota_windows"`
+	Credits                *CreditSummary          `json:"credits,omitempty"`
+	ResetCreditsAvailable  *int64                  `json:"reset_credits_available,omitempty"`
+	ResetCredits           []ResetCredit           `json:"reset_credits,omitempty"`
 }

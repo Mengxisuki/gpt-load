@@ -254,6 +254,13 @@ func (s *Service) importCredentialStageWithNetwork(
 	driver subscriptionruntime.Driver,
 	network subscriptionruntime.NetworkContext,
 ) (CredentialStageResult, error) {
+	// 与首个挂靠授权串行，检查和上游刷新之间不能插入私有声明。
+	s.hostingStageMu.Lock()
+	defer s.hostingStageMu.Unlock()
+	// 文件导入会刷新令牌，必须在任何上游调用前执行挂靠边界检查。
+	if err := s.forbidHostedCodexImport(ctx, channelID); err != nil {
+		return CredentialStageResult{}, err
+	}
 	ctx = subscriptionruntime.WithNetworkContext(ctx, network)
 	importContext, cancelImport := credentialImportContext(ctx)
 	defer cancelImport()
@@ -325,6 +332,13 @@ func (s *Service) prepareReadySubscriptionStageCredential(
 	expiresAt, known := credential.ExpiresAt()
 	if !forceRefresh && (!known || expiresAt.After(s.now().Add(5*time.Minute))) {
 		return credential, nil
+	}
+	// 临时 Stage 没有正式凭据的身份锁，挂靠启用后禁止在这里旋转 Codex 令牌。
+	// 浏览器授权返回的新令牌通常无需刷新；已过期则让用户重新开始授权。
+	s.hostingStageMu.Lock()
+	defer s.hostingStageMu.Unlock()
+	if err := s.forbidHostedCodexImport(ctx, channel.ID(row.ChannelID)); err != nil {
+		return subscriptionruntime.Credential{}, err
 	}
 	if s.refreshSubscriptionCredential == nil {
 		return subscriptionruntime.Credential{}, app_errors.ErrAuthorizationUnavailable
@@ -1514,6 +1528,10 @@ func (s *Service) consumeCredentialStages(
 	nowMS := s.now().UnixMilli()
 	added := 0
 	for _, stage := range stages {
+		// Stage 即使由管理员消费，也不能绕过已声明的私有归属。
+		if err := s.validateHostingStageDestination(tx, stage, groupID); err != nil {
+			return 0, nil, err
+		}
 		plaintext, err := s.encryption.Decrypt(stage.EncryptedPayload)
 		if err != nil {
 			return 0, nil, app_errors.ErrStagedCredentialMismatch

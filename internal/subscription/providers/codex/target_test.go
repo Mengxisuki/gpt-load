@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -105,6 +106,68 @@ func TestBusinessTargetPreservesNativeEndpoints(t *testing.T) {
 						t.Fatalf("requests = %v; want %v", got, want)
 					}
 				})
+			}
+		})
+	}
+}
+
+// 主额度与卡详情独立观测：详情失败不得把未知卡数变成零。
+// 测试只替换 HTTP 传输层，实际执行驱动解析与标准化。
+// 三个用例分别覆盖已知零、完全未知和已知数量但详情失败。
+// 空数组成功不能错误地显示成接口异常。
+// 服务返回错误不能错误地显示成没有卡。
+// partial 只说明计数存在，不能让用户误认到期日期也已刷新。
+// HTTP 传输桩按真正业务路径区分主额度和卡片接口。
+// 厂商错误正文使用空对象，不依赖某个具体错误字符串。
+// 每个子测试恢复默认传输层，避免污染其他官方目标测试。
+// 这里不并行改动全局 transport，确保桩只影响当前用例。
+// 观测成功输出仍经过 JSON 反序列化，覆盖对外字段实际命名。
+// 新鲜时间必须是独立字段，不能由 UI 在收到响应时自行补造。
+// 这种局部故障不会触发自动重置，也不会消耗机会。
+// 测试只证明解析与状态契约，不能推断真实账号持有多少张卡。
+func TestObserveResetCreditAvailability(t *testing.T) {
+	driver := newCodexDriver()
+	credential, err := driver.Parse([]byte(`{"type":"codex","access_token":"test-access","refresh_token":"test-refresh","account_id":"account-one"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 空数组是成功观测到零张卡，错误响应才是不可用。
+	// 主响应带计数但详情失败时只承诺数量，不承诺每张到期时间。
+	for _, test := range []struct {
+		name, usage, details, state string
+		status                      int
+	}{
+		{"empty known", `{"rate_limit":{}}`, `[]`, "fresh", 200},
+		{"unknown", `{"rate_limit":{}}`, `{}`, "unavailable", 503},
+		{"partial", `{"rate_limit":{},"rate_limit_reset_credits":{"available_count":2}}`, `{}`, "partial", 503},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previous := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = previous })
+			http.DefaultTransport = targetRoundTripper(func(r *http.Request) (*http.Response, error) {
+				body, status := test.usage, 200
+				if strings.Contains(r.URL.Path, "rate-limit-reset-credits") {
+					body, status = test.details, test.status
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			// 不调用消费接口，任何副作用都不属于额度读取契约。
+			// 读取真实归一化输出，而非直接构造对外 DTO 自证正确。
+			observed, err := driver.Observe(t.Context(), credential, subscriptionruntime.NewTarget([]byte(`{}`)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var snapshot quotaSnapshot
+			if err := json.Unmarshal(observed.Payload, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.ResetCreditObservation == nil || snapshot.ResetCreditObservation.State != test.state {
+				t.Fatalf("card state=%#v", snapshot.ResetCreditObservation)
+			}
+			// 新鲜卡详情必须带独立时间，避免混用主额度更新时间。
+			// 失败时仍保留成功的主额度内容，允许用户识别局部故障。
+			if test.state == "fresh" && snapshot.ResetCreditObservation.ObservedAtMS == nil {
+				t.Fatal("missing detail observation time")
 			}
 		})
 	}

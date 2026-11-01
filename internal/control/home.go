@@ -319,10 +319,9 @@ func accessibleHomeGroups(
 ) map[uint]struct{} {
 	result := make(map[uint]struct{})
 	for groupID, group := range snapshot.Groups {
-		if len(accessKey.Filters.Groups) > 0 {
-			if _, allowed := accessKey.Filters.Groups[groupID]; !allowed {
-				continue
-			}
+		// 个人视图沿用执行层私有门禁，避免模型和资源统计侧漏。
+		if !snapshot.AllowsGroup(accessKey, groupID) {
+			continue
 		}
 		protocolAllowed := len(accessKey.Filters.Protocols) == 0
 		for _, value := range group.ClientProtocols {

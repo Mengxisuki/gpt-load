@@ -187,6 +187,7 @@ const observationSnapshotFields = [
   'account_summary',
   'quota_windows',
   'credits',
+  'reset_credit_observation',
   'reset_credits_available',
   'reset_credits',
 ] as const
@@ -429,6 +430,22 @@ function projectObservationSnapshot(value: unknown): CredentialObservationSnapsh
   ) {
     invalidResponse()
   }
+  // 子状态从严格字段白名单读取，不能借此夹带上游原始响应。
+  // 时间戳缺失保留未知，避免使用主额度时间伪装卡详情的新鲜度。
+  let resetCreditObservation: CredentialObservationSnapshotDto['reset_credit_observation']
+  if (record.reset_credit_observation != null) {
+    const detail = projectRecord(record.reset_credit_observation)
+    assertNoSecretLikeFields(detail, ['state', 'observed_at_ms', 'error_code'])
+    resetCreditObservation = {
+      state: projectEnum(detail.state, ['fresh', 'partial', 'unavailable'] as const),
+      ...(detail.observed_at_ms == null
+        ? {}
+        : { observed_at_ms: projectEpochMilliseconds(detail.observed_at_ms) }),
+      ...(detail.error_code == null
+        ? {}
+        : { error_code: projectString(detail.error_code, { allowEmpty: false }) }),
+    }
+  }
   let accountSummary: CredentialObservationSnapshotDto['account_summary']
   let credits: CredentialObservationSnapshotDto['credits']
   if (record.credits != null) {
@@ -491,6 +508,9 @@ function projectObservationSnapshot(value: unknown): CredentialObservationSnapsh
     },
     ...(accountSummary === undefined ? {} : { account_summary: accountSummary }),
     quota_windows: quotaWindows,
+    ...(resetCreditObservation === undefined
+      ? {}
+      : { reset_credit_observation: resetCreditObservation }),
     ...(credits === undefined ? {} : { credits }),
     ...(record.reset_credits_available === undefined
       ? {}

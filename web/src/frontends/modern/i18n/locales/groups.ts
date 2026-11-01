@@ -9,6 +9,8 @@ export const zhCN = {
     stale: '列表刷新失败，当前显示上次加载的数据。',
   },
   groups: {
+    hostingState: { pending: '待激活', active: '已启用', paused: '已暂停', deleted: '已解绑' },
+    category: { label: '资源分类', all: '全部资源', platform: '平台资源', hosting: '用户挂靠' },
     row: listZhCN,
     board: {
       views: { all: '全部分组', serving: '可服务', attention: '需关注', paused: '已暂停' },
@@ -118,6 +120,18 @@ export const enUS: typeof zhCN = {
     stale: 'Refresh failed. Showing previously loaded data.',
   },
   groups: {
+    hostingState: {
+      pending: 'Pending activation',
+      active: 'Active',
+      paused: 'Paused',
+      deleted: 'Removed',
+    },
+    category: {
+      label: 'Resource category',
+      all: 'All resources',
+      platform: 'Platform resources',
+      hosting: 'Hosted accounts',
+    },
     row: listEnUS,
     board: {
       views: {
@@ -237,6 +251,18 @@ export const jaJP: typeof zhCN = {
     stale: '更新に失敗しました。前回のデータを表示しています。',
   },
   groups: {
+    hostingState: {
+      pending: '有効化待ち',
+      active: '有効',
+      paused: '一時停止',
+      deleted: '解除済み',
+    },
+    category: {
+      label: 'リソース分類',
+      all: 'すべてのリソース',
+      platform: 'プラットフォーム',
+      hosting: 'ユーザーアカウント',
+    },
     row: listJaJP,
     board: {
       views: { all: 'すべて', serving: '提供中', attention: '要確認', paused: '停止中' },

@@ -403,10 +403,9 @@ func scopeProjectModelGroups(
 		if !group.Enabled {
 			continue
 		}
-		if len(accessKey.Filters.Groups) > 0 {
-			if _, allowed := accessKey.Filters.Groups[group.ID]; !allowed {
-				continue
-			}
+		// 个人视图沿用执行层私有门禁，避免模型和资源统计侧漏。
+		if !snapshot.AllowsGroup(accessKey, group.ID) {
+			continue
 		}
 		protocols, err := projectModelGroupProtocols(registry, group)
 		if err != nil {

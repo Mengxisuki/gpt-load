@@ -253,6 +253,12 @@ export interface CredentialObservationSnapshotDto {
   account_summary?: CredentialObservationAccountSummaryDto
   quota_windows: CredentialQuotaWindowDto[]
   credits?: CredentialCreditSummaryDto
+  // 卡详情可用性独立于主额度，缺失次数不能解释为零。
+  reset_credit_observation?: {
+    state: 'fresh' | 'partial' | 'unavailable'
+    observed_at_ms?: number
+    error_code?: string
+  }
   reset_credits_available?: number
   reset_credits?: CredentialResetCreditDto[]
 }

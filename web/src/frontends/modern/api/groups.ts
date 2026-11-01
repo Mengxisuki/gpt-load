@@ -37,6 +37,12 @@ export interface CredentialCounts {
   modelCooldown: number
 }
 export interface GroupRow {
+  // 分类与归属由服务端绑定派生，界面不提供编辑入口。
+  // 可选字段保留对旧快照的读取兼容；旧数据默认为平台资源。
+  category?: 'platform' | 'hosting'
+  ownerRef?: string
+  accountRef?: string
+  hostingStatus?: string
   priority: number
   concurrency: ConcurrencyView
   id: number
@@ -136,6 +142,11 @@ export async function getGroupWorkspace(
     const item = record(value)
     const counts = record(item.credentials)
     return {
+      // 只读标签辅助管理员识别私有账号，不能作为权限判定。
+      category: oneOf(item.category ?? 'platform', ['platform', 'hosting'] as const),
+      ownerRef: text(item.owner_ref ?? ''),
+      accountRef: text(item.account_ref ?? ''),
+      hostingStatus: text(item.hosting_status ?? ''),
       concurrency: readConcurrency(item.concurrency),
       id: integer(item.id, 1),
       name: text(item.name),

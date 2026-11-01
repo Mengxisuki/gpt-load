@@ -78,12 +78,14 @@ type ObservationWindowUsage struct {
 }
 
 type CredentialObservationSnapshot struct {
-	Plan                  ObservationPlanSummary             `json:"plan_summary"`
-	Account               *ObservationAccountSummary         `json:"account_summary,omitempty"`
-	QuotaWindows          []ObservationQuotaWindow           `json:"quota_windows"`
-	Credits               *providerobservation.CreditSummary `json:"credits,omitempty"`
-	ResetCreditsAvailable *int64                             `json:"reset_credits_available,omitempty"`
-	ResetCredits          []ObservationResetCredit           `json:"reset_credits,omitempty"`
+	// 重置卡端点可能单独失败，必须保留其独立状态。
+	ResetCreditObservation *providerobservation.ResetCreditObservation `json:"reset_credit_observation,omitempty"`
+	Plan                   ObservationPlanSummary                      `json:"plan_summary"`
+	Account                *ObservationAccountSummary                  `json:"account_summary,omitempty"`
+	QuotaWindows           []ObservationQuotaWindow                    `json:"quota_windows"`
+	Credits                *providerobservation.CreditSummary          `json:"credits,omitempty"`
+	ResetCreditsAvailable  *int64                                      `json:"reset_credits_available,omitempty"`
+	ResetCredits           []ObservationResetCredit                    `json:"reset_credits,omitempty"`
 }
 
 type CredentialObservationResponse struct {

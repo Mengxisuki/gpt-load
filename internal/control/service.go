@@ -90,10 +90,13 @@ type Service struct {
 		operationStage,
 	) error
 	operationRecoveryWake chan struct{}
-	writeMu               sync.RWMutex
-	observationMu         sync.Mutex
-	observationFlights    map[observationFlightKey]*observationFlight
-	observationSemaphore  chan struct{}
+	// 挂靠跨步骤操作串行；数据库唯一约束仍是最终归属防线。
+	hostingMu            sync.Mutex
+	hostingStageMu       sync.Mutex
+	writeMu              sync.RWMutex
+	observationMu        sync.Mutex
+	observationFlights   map[observationFlightKey]*observationFlight
+	observationSemaphore chan struct{}
 }
 
 type credentialRuntimeRetirer interface {

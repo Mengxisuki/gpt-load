@@ -228,7 +228,8 @@ func websocketGroupEnabled(snapshot *state.ConfigSnapshot, key state.AccessKeyVi
 	if !exists || !snapshot.GroupCatalog[groupID].Enabled || !group.ResponsesWebsocketEnabled || !group.ResolvedTarget.ResponsesWebsocket.Native {
 		return false
 	}
-	if _, allowed := key.Filters.Groups[groupID]; len(key.Filters.Groups) > 0 && !allowed {
+	// 长连接建连同样校验私有归属，不能沿用空筛选全放行。
+	if !snapshot.AllowsGroup(key, groupID) {
 		return false
 	}
 	if _, allowed := key.Filters.Protocols[protocol.OpenAIResponses]; len(key.Filters.Protocols) > 0 && !allowed {

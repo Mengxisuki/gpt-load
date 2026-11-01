@@ -14,6 +14,11 @@ import (
 
 // ModernGroupItem 只提供工作区需要的展示事实，不改变分组的配置或健康状态。
 type ModernGroupItem struct {
+	// 分类由不可编辑的绑定决定；名称或标签不能授予私有资源权限。
+	Category               string                          `json:"category"`
+	OwnerRef               string                          `json:"owner_ref,omitempty"`
+	AccountRef             string                          `json:"account_ref,omitempty"`
+	HostingStatus          string                          `json:"hosting_status,omitempty"`
 	Priority               int32                           `json:"priority"`
 	Concurrency            ConcurrencyView                 `json:"concurrency"`
 	ID                     uint                            `json:"id"`
@@ -55,6 +60,16 @@ func (s *Service) ListModernGroups(ctx context.Context) (ModernGroupsResponse, e
 		byID[item.ID] = item
 	}
 	result := ModernGroupsResponse{AutoModels: s.autoModelNames(), ObservedAtMS: observedAt, Items: make([]ModernGroupItem, 0, len(records))}
+
+	// 一次读取绑定，避免列表按组逐个查询；不加载上游授权秘密。
+	var bindings []models.HostingBinding
+	if err := s.db.WithContext(ctx).Where("status <> ?", "deleted").Find(&bindings).Error; err != nil {
+		return ModernGroupsResponse{}, err
+	}
+	byGroup := make(map[uint]models.HostingBinding, len(bindings))
+	for _, binding := range bindings {
+		byGroup[binding.GroupID] = binding
+	}
 	for _, record := range records {
 		var params struct {
 			BaseURL string `json:"base_url"`
@@ -67,13 +82,26 @@ func (s *Service) ListModernGroups(ctx context.Context) (ModernGroupsResponse, e
 		if endpoint == "" {
 			endpoint = definition.DefaultBaseURL
 		}
+
+		binding, private := byGroup[record.ID]
+		category := "platform"
+		if private {
+			category = "hosting"
+		}
+		// 私有 Key 尚未激活或已暂停时，不能按健康凭据数显示为可服务。
+		// Group 自身配置保持真实值，业务启停状态单独由绑定控制。
+		availability := modernGroupAvailability(record)
+		if private && binding.Status != "active" {
+			availability = "paused"
+		}
 		result.Items = append(result.Items, ModernGroupItem{
+			Category: category, OwnerRef: binding.OwnerRef, AccountRef: binding.AccountRef, HostingStatus: binding.Status,
 			Priority:    record.Priority,
 			Concurrency: record.Concurrency,
 			ID:          record.ID, Name: record.Name, ChannelID: record.ChannelID,
 			ChannelName: definition.Name, ChannelMark: definition.Mark, ChannelIcon: definition.Icon,
 			ConnectionType: record.ConnectionType, Endpoint: endpoint,
-			Enabled: record.Enabled, Availability: modernGroupAvailability(record),
+			Enabled: record.Enabled, Availability: availability,
 			Weight: record.Weight, PriceMultiplier: record.PriceMultiplier,
 			ModelCount:             record.ModelCount,
 			ModelNames:             record.ModelNames,

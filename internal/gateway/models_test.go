@@ -429,3 +429,40 @@ func TestVisibleOpenAIModelIDsIncludesUtilityRoutes(t *testing.T) {
 		})
 	}
 }
+
+// 私有目录与真实路由使用同一个门禁，别名不能绕过账号绑定。
+// 普通全量 Key 看不到私有模型，专属 Key 不获得其他账号目录。
+// 数据面目录包含普通 OpenAI 与 Codex 专用两种路径。
+// 二者必须共享权限，不能只隐藏其中一个目录。
+// 使用实际客户端目录支持的模型名，避免目录过滤掩盖权限错误。
+// 同厂商两个账号的模型有意不同，便于确认隔离结果。
+// 无权的显式组过滤与无筛选 Key 都需要得到空目录。
+// 目录检查不会连接上游，也不依赖凭据健康。
+func TestHostingVisibleModels(t *testing.T) {
+	snapshot, err := state.Compile(state.CompileInput{
+		ChannelRegistry: channel.NewRegistry(), HostingGroups: map[uint]uint{1: 7, 2: 8},
+		Groups: []state.GroupConfig{
+			{ID: 1, ChannelID: channel.Codex, ConnectionType: "subscription", Params: json.RawMessage(`{}`), Models: []state.ModelConfig{{ID: "gpt-5.5"}}, Enabled: true},
+			{ID: 2, ChannelID: channel.Codex, ConnectionType: "subscription", Params: json.RawMessage(`{}`), Models: []state.ModelConfig{{ID: "gpt-5.4"}}, Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 覆盖空组筛选与显式伪造组筛选；仅改过滤器不构成所有权。
+	// 编译真实渠道能力，目录只读取已编译路由而非测试手写目录。
+	for _, key := range []state.AccessKeyView{{ID: 9}, {ID: 9, Filters: state.FilterSet{Groups: map[uint]struct{}{1: {}}}}} {
+		if got := visibleModelIDs(snapshot, key, protocol.OpenAIResponses); len(got) != 0 {
+			t.Fatalf("private models leaked: %v", got)
+		}
+	}
+	// 同一厂商两个账号依然相互独立，模型别名不会合并权限。
+	// 同时核对 Codex 客户端专用目录，避免普通目录通过但专用目录漏出。
+	key := state.AccessKeyView{ID: 7, Filters: state.FilterSet{Groups: map[uint]struct{}{1: {}}}}
+	if got := visibleModelIDs(snapshot, key, protocol.OpenAIResponses); !reflect.DeepEqual(got, []string{"gpt-5.5"}) {
+		t.Fatalf("owner models: %v", got)
+	}
+	if got := collectCodexVisibleModelIDs(snapshot, key); !reflect.DeepEqual(got, []string{"gpt-5.5"}) {
+		t.Fatalf("Codex owner models: %v", got)
+	}
+}

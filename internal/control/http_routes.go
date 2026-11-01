@@ -41,7 +41,7 @@ func (s *Server) HTTPModule() httproute.Module {
 		Authenticate:      s.authenticate(),
 		NotFound:          controlRouteNotFound,
 		MethodNotAllowed:  controlMethodNotAllowed,
-		Routes: []httproute.Route{
+		Routes: append(s.hostingRoutes(), []httproute.Route{
 			controlRoute("control.proxies.list", http.MethodGet, "/proxies", s.handleListProxies),
 			controlRoute("control.proxies.create", http.MethodPost, "/proxies", s.auditMutation(newMutationDescriptor("proxy_create", "proxy", staticMutationLocator("new"))), s.handleSaveProxy),
 			controlRoute("control.proxies.update", http.MethodPut, "/proxies/:id", s.auditMutation(newMutationDescriptor("proxy_update", "proxy", proxyMutationLocator)), s.handleSaveProxy),
@@ -556,7 +556,7 @@ func (s *Server) HTTPModule() httproute.Module {
 				)),
 				s.handleDeleteAccessKey,
 			),
-		},
+		}...),
 	}
 }
 

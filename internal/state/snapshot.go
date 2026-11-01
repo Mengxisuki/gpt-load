@@ -30,6 +30,8 @@ import (
 const maxSafeAccessKeyEpochMS = int64(9_007_199_254_740_991)
 
 type CompileInput struct {
+	// 挂靠组到内部 Key 的授权映射；0 表示尚未激活。
+	HostingGroups        map[uint]uint
 	RequestRedaction     []requestredact.Rule
 	Jev                  *jev.Config
 	RequestAudit         *requestaudit.Config
@@ -212,6 +214,8 @@ type AccessKeyView struct {
 }
 
 type ConfigSnapshot struct {
+	// 私有资源不能通过普通全量 Key 枚举或执行。
+	HostingGroups         map[uint]uint
 	RequestRedaction      *requestredact.Compiled
 	Jev                   jev.Config
 	RequestAudit          requestaudit.Config
@@ -321,6 +325,7 @@ func Compile(input CompileInput) (*ConfigSnapshot, error) {
 	}
 
 	snapshot := &ConfigSnapshot{
+		HostingGroups:    make(map[uint]uint, len(input.HostingGroups)),
 		RequestRedaction: redaction,
 		Jev:              shared, RequestAudit: audit,
 		AutoModels:            autoModels,
@@ -335,6 +340,9 @@ func Compile(input CompileInput) (*ConfigSnapshot, error) {
 		GlobalProxy:           globalProxy,
 	}
 
+	for groupID, keyID := range input.HostingGroups {
+		snapshot.HostingGroups[groupID] = keyID
+	}
 	for _, group := range input.Groups {
 		catalogView := GroupCatalogView{
 			Priority: group.Priority,

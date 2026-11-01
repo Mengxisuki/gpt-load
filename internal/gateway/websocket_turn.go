@@ -216,12 +216,13 @@ func (s *websocketConnection) executeTurn(turn websocketTurn) {
 			s.cancel()
 			return
 		}
-		_, groupAllowed := key.Filters.Groups[binding.ref.GroupID]
+		// 每一轮重新检查当前快照，暂停账号后既有连接不能发新请求。
+		groupAllowed := snapshot.AllowsGroup(key, binding.ref.GroupID)
 		_, protocolAllowed := key.Filters.Protocols[protocol.OpenAIResponses]
 		if !exists || !ready || !sameWebsocketIdentity(binding.ref, currentRef) || !groupExists ||
 			string(group.ChannelID) != binding.channel ||
 			string(group.ResolvedTarget.TargetConfig) != binding.target ||
-			(len(key.Filters.Groups) > 0 && !groupAllowed) || (len(key.Filters.Protocols) > 0 && !protocolAllowed) {
+			!groupAllowed || (len(key.Filters.Protocols) > 0 && !protocolAllowed) {
 			reject(reasonConfigurationChanged)
 			s.cancel()
 			return

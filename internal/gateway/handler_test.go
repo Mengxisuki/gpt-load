@@ -5447,3 +5447,51 @@ func newConvertedFallbackHandlerTestRuntime(
 	bindGatewayRoutesForTest(t, engine, handler)
 	return engine, registry
 }
+
+// 请求进入真实网关路由和调度器，只有绑定 Key 才能触达执行器。
+// 使用 API Key 渠道测试通用组门禁；Codex 身份绑定由控制层测试覆盖。
+// 上游执行器是唯一替换的外部边界，鉴权和私有快照均为真实实现。
+// 显式组筛选不能代替绑定 Key 的身份匹配。
+// 否则管理员误填过滤器就会授权另一个用户账号。
+// 普通 Key 保持空组筛选，复现历史默认允许全部的高风险路径。
+// 最后才发送授权请求，证明同一运行态资源确实可以执行。
+// 成功请求只能产生一次尝试，不能通过错误重试进入其他来源。
+// 此用例不模拟订阅刷新，避免把门禁测试与厂商授权耦合。
+// 私有绑定的数据库完整性另由 loader 和控制层测试保障。
+func TestHandlerHostingPreventsUnownedExecution(t *testing.T) {
+	forwarder := &scriptedForwarder{results: []UpstreamResult{{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: []byte(`{"id":"ok","choices":[]}`)}}}
+	handler, manager, _ := newHandlerForTest(t, forwarder, "private-upstream")
+	input := state.CompileInput{ChannelRegistry: channel.NewRegistry(), HostingGroups: map[uint]uint{1: 2},
+		Groups:      []state.GroupConfig{{ID: 1, Name: "private", ChannelID: channel.OpenAI, ConnectionType: "api_key", Params: json.RawMessage(`{}`), Models: []state.ModelConfig{{ID: "gpt-4o"}}, Enabled: true}},
+		Credentials: []state.CredentialConfig{{ID: 1, GroupID: 1, Status: state.CredentialStatusActive, Version: 1, IdentityGeneration: 1, Fingerprint: "credential-1"}},
+	}
+	// 普通全量 Key、伪造组过滤 Key 与真正绑定 Key 使用相同请求体。
+	// 区别只在可信快照中的绑定关系，不能由请求中的模型名替代。
+	for i, secret := range []string{"public", "owner", "other"} {
+		filters := state.FilterSet{}
+		if i > 0 {
+			filters.Groups = map[uint]struct{}{1: {}}
+		}
+		input.AccessKeys = append(input.AccessKeys, state.AccessKeyConfig{ID: uint(i + 1), Name: secret, KeyHash: handler.encryption.Hash(secret), Status: state.AccessKeyStatusActive, Filters: filters})
+	}
+	if _, err := manager.Publish(input); err != nil {
+		t.Fatal(err)
+	}
+	engine := gin.New()
+	bindGatewayRoutesForTest(t, engine, handler)
+	// 两个拒绝请求必须在执行器之前结束，不能靠返回错误掩盖已调用上游。
+	// 先执行拒绝请求，确保观察到的执行次数没有混入授权请求。
+	for _, secret := range []string{"public", "other", "owner"} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}`))
+		request.Header.Set("Authorization", "Bearer "+secret)
+		result := httptest.NewRecorder()
+		engine.ServeHTTP(result, request)
+		if secret != "owner" {
+			if result.Code == 200 || len(forwarder.inputs) != 0 {
+				t.Fatalf("unowned execution key=%s status=%d attempts=%d", secret, result.Code, len(forwarder.inputs))
+			}
+		} else if result.Code != 200 || len(forwarder.inputs) != 1 {
+			t.Fatalf("owner execution status=%d attempts=%d body=%s", result.Code, len(forwarder.inputs), result.Body)
+		}
+	}
+}

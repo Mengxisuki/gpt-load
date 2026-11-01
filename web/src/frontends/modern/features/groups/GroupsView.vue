@@ -254,6 +254,22 @@ const viewOptions = computed(() =>
     count: data.value ? n(counts.value[value]) : undefined,
   })),
 )
+// 资源分类只影响列表展示，真实调用权限由执行层统一校验。
+// 独立本地筛选避免改动既有 URL 筛选协议。
+// 分类值来自已校验 DTO；旧快照没有该字段时属于平台资源。
+// 用户归属通过已有搜索同时匹配，无需另建管理员用户目录。
+// 页面只处理可见性筛选，不能据此决定调用授权。
+// 本地分类不写入用户账号或 Group 的持久配置。
+// 翻页仍使用既有过滤结果和边界修正，不保留越界页码。
+// 搜索字段包含不透明账号引用，方便跨两服务排障对账。
+// 手机端沿用同一个公共选择组件，键盘也可操作。
+const resourceCategory = ref('')
+const categoryOptions = computed(() =>
+  ['', 'platform', 'hosting'].map((value) => ({
+    value,
+    label: t(`groups.category.${value || 'all'}`),
+  })),
+)
 const filtered = computed(() => {
   if (frozenGroups.value) {
     const latest = new Map(groups.value.map((group) => [group.id, group]))
@@ -264,6 +280,8 @@ const filtered = computed(() => {
   const rank = (group: GroupRow) => (isPaused(group) ? 2 : needsAttention(group) ? 0 : 1)
   return groups.value
     .filter((group) => {
+      if (resourceCategory.value && (group.category ?? 'platform') !== resourceCategory.value)
+        return false
       if (f.view === 'serving' && !isServing(group)) return false
       if (f.view === 'attention' && !needsAttention(group)) return false
       if (f.view === 'paused' && !isPaused(group)) return false
@@ -284,7 +302,14 @@ const filtered = computed(() => {
         )
       )
         return false
-      const text = [group.name, group.channelName, group.channelID, group.endpoint]
+      const text = [
+        group.name,
+        group.channelName,
+        group.channelID,
+        group.endpoint,
+        group.ownerRef,
+        group.accountRef,
+      ]
         .join(' ')
         .toLocaleLowerCase()
       return words.every((word) => text.includes(word))
@@ -749,6 +774,12 @@ useMessageSource(() =>
           @compositionend="endComposition"
         />
       </div>
+      <!-- 归属引用可通过搜索定位；分类不允许改变账号所有者。 -->
+      <AppSelect
+        v-model="resourceCategory"
+        :label="t('groups.category.label')"
+        :options="categoryOptions"
+      />
       <AppFilterSheet
         v-model:open="moreFilters"
         :mobile="isMobile"
