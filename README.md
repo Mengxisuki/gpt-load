@@ -165,6 +165,8 @@ When working over SSH or from a remote browser, the browser's `localhost` may no
 
 ## Deployment and data
 
+本 fork 的 Oak 内网部署及开发发布分支说明见 [Oak 部署说明](deploy/oak/README.md)。
+
 Docker Compose uses application-managed SQLite by default. Data lives in the `gpt-load-data` named volume and includes the database, `auth.key`, and `encryption.key`.
 
 > [!IMPORTANT]

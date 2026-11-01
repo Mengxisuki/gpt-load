@@ -1,0 +1,130 @@
+name: Oak GPT-Load 内网构建与发布
+
+# 仅oak推送自动发布；纯上游分支不会连接服务器。
+on:
+  push:
+    branches: [oak]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 将通过检查的版本发布到wdm的内网实例
+        type: boolean
+        default: false
+        required: true
+
+# 构建不获得仓库写权限；部署私钥只交给独立环境任务。
+permissions:
+  contents: read
+concurrency:
+  group: gpt-load-oak-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOWORK: 'off'
+      GOPROXY: https://proxy.golang.org|direct
+    outputs:
+      release: ${{ steps.version.outputs.release }}
+      revision: ${{ steps.version.outputs.revision }}
+    steps:
+      - name: 限定开发发布分支
+        run: test "$GITHUB_REF" = refs/heads/oak
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # 复用官方冻结安装、lint、格式、类型检查和真实前端构建。
+      - uses: ./.github/actions/web-ci
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            third_party/cpaembedded/go.sum
+      - name: 后端与独立CPA模块回归
+        run: |
+          go vet ./...
+          go test -count=1 -timeout=15m . ./internal/...
+          (cd third_party/cpaembedded && GOWORK=off go test -count=1 ./...)
+      - name: 发布格式与脚本测试
+        run: |
+          python3 -B -m unittest discover -s deploy/oak/tests -v
+          git diff --check
+      - name: 确定唯一版本
+        id: version
+        run: |
+          printf 'release=oak-%s-%s-%s\n' "${GITHUB_SHA:0:12}" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'revision=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - name: 构建静态Linux程序与发布包
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: amd64
+          RELEASE_ID: ${{ steps.version.outputs.release }}
+        run: |
+          mkdir -p build/oak
+          go build -trimpath -ldflags "-s -w -X gpt-load/internal/platform/version.Version=$RELEASE_ID" -o build/oak/gpt-load .
+          python3 deploy/oak/release.py pack build/oak/gpt-load "$RELEASE_ID" "$GITHUB_SHA" build/oak/release.tar.gz
+      # 真实启动隔离临时SQLite，检查前端、鉴权和持久化密钥，不接触生产数据。
+      - name: 运行原生发布烟测
+        env:
+          RELEASE_SMOKE_BINARY: ${{ github.workspace }}/build/oak/gpt-load
+          RELEASE_SMOKE_CHECKSUM_FILE: ${{ github.workspace }}/build/oak/binary.sha256
+          RELEASE_VERSION: ${{ steps.version.outputs.release }}
+        run: |
+          (cd build/oak && sha256sum gpt-load > binary.sha256)
+          bash .github/scripts/release-native-smoke.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gpt-load-oak-release
+          path: |
+            build/oak/release.tar.gz
+            build/oak/release.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' || inputs.deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: oak-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: gpt-load-oak-release
+          path: release
+      - name: 通过专用受限SSH入口发布
+        env:
+          DEPLOY_KEY: ${{ secrets.GPT_LOAD_DEPLOY_SSH_KEY }}
+          RELEASE_ID: ${{ needs.build.outputs.release }}
+          REVISION: ${{ needs.build.outputs.revision }}
+        run: |
+          set -euo pipefail
+          test -n "$DEPLOY_KEY"
+          key_dir=$(mktemp -d "$RUNNER_TEMP/gpt-load-ssh.XXXXXX")
+          trap 'rm -rf -- "$key_dir"' EXIT
+          chmod 700 "$key_dir"
+          printf '%s\n' "$DEPLOY_KEY" > "$key_dir/key"
+          chmod 600 "$key_dir/key"
+          unset DEPLOY_KEY
+          ssh_options=(-i "$key_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile=deploy/oak/known_hosts
+            -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+          # 指纹来自已受信ssh wdm连接，不能临时扫描后盲目信任。
+          (cd release && sha256sum -c release.tar.gz.sha256)
+          digest=$(sha256sum release/release.tar.gz)
+          digest=${digest%% *}
+          ssh "${ssh_options[@]}" root@172.96.16.93 check
+          ssh "${ssh_options[@]}" root@172.96.16.93 \
+            "deploy $RELEASE_ID $REVISION $digest" < release/release.tar.gz
+          # 没有公网入口，版本、管理会话与数据库读验证均由服务器执行。
+          ssh "${ssh_options[@]}" root@172.96.16.93 check

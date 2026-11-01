@@ -1,0 +1,33 @@
+# 独立应用用户与目录；不访问NewApi数据库或配置。
+[Unit]
+Description=Oak GPT-Load private gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=gpt-load
+Group=gpt-load
+EnvironmentFile=/etc/gpt-load/gpt-load.env
+WorkingDirectory=/var/lib/gpt-load
+ExecStart=/opt/gpt-load/current/gpt-load
+# 数据及自动生成密钥跨发布持久保存，只有应用用户和root能读。
+StateDirectory=gpt-load
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+LimitNOFILE=65535
+# 小内存服务器与既有业务共存；Go软限制留出运行时及网络缓冲空间。
+MemoryHigh=512M
+MemoryMax=768M
+Environment=GOMEMLIMIT=384MiB
+# 发布目录root只读，应用不得用内置update绕过CI替换自身。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/gpt-load
+
+[Install]
+WantedBy=multi-user.target

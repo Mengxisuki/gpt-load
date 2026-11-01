@@ -165,6 +165,8 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 
 ## 部署与数据
 
+本 fork 的 Oak 内网实例、分支职责和自动发布流程见 [Oak 部署说明](deploy/oak/README.md)。以下 Docker 与原生用法仍为上游通用说明。
+
 Docker Compose 默认使用应用管理的 SQLite，数据存放在 `gpt-load-data` 具名卷中，包含数据库、`auth.key` 和 `encryption.key`。
 
 > [!IMPORTANT]
