@@ -22,6 +22,10 @@ English · [中文](README_CN.md) · [日本語](README_JP.md) | [Official Websi
 
 ---
 
+## Oak 挂靠扩展
+
+Oak 用户与授权由 New API 管理，gpt-load 的 `/api/hosting/v1/*` 仅接受绑定当前请求的短期用户断言；无需把管理员 `AUTH_KEY` 配置到 New API。非秘密 `OAK_NEW_API_URL` 默认为 `http://127.0.0.1:3000`，核验失败时禁止执行。账号内部受限 Key 继续用于数据面。结构、接口与测试说明见 [挂靠执行契约](docs/hosting-api.md)，部署见 [Oak 部署说明](deploy/oak/README.md)。
+
 ## Sponsors
 
 <sub>[Become a sponsor](mailto:tangb7420@gmail.com)</sub>
@@ -234,7 +238,7 @@ At startup, the application reads `.env` in the current directory; existing proc
 | `DATABASE_DSN` | Empty, uses `${DATA_DIR}/gpt-load.db` | Empty uses application-managed SQLite; non-empty values support SQLite paths or URLs, MySQL URLs, and PostgreSQL URLs, and are treated as operator-managed external databases. Container file paths must be inside a mounted directory. |
 | `DATABASE_MAX_OPEN_CONNECTIONS` | `10` | Maximum open connections for MySQL and PostgreSQL, positive integer. SQLite always uses one connection. |
 | `DATABASE_MAX_IDLE_CONNECTIONS` | `5` | Maximum idle connections for MySQL and PostgreSQL, positive integer and no greater than `DATABASE_MAX_OPEN_CONNECTIONS`. SQLite always uses one connection. |
-| `AUTH_KEY` | Empty, reads or generates `${DATA_DIR}/auth.key` | Bearer key for the management UI and `/api` management API, not a data-plane AccessKey. |
+| `AUTH_KEY` | Empty, reads or generates `${DATA_DIR}/auth.key` | Bearer key for the management UI and ordinary `/api` management API; excluded from Oak `/api/hosting/v1/*`, not a data-plane AccessKey. |
 | `ENCRYPTION_KEY` | Empty, reads or generates `${DATA_DIR}/encryption.key` | Encrypts channel credentials; changing or losing it makes existing credentials undecryptable, so back it up with the database. |
 | `CLIENT_IP_HEADER` | Empty, uses the connection IP | Client IP header, such as `X-Forwarded-For` or `CF-Connecting-IP`; missing or invalid values fall back to the connection IP. Shared by logs, AccessKey IP restrictions, and other IP consumers; supports IPv4/IPv6. Restart after changes. |
 | `TRUSTED_PROXIES` | Empty | Optional comma-separated proxy IPs or CIDRs; applies only with `CLIENT_IP_HEADER`. Empty means trusting the selected header directly, with trust enforced by your deployment. When set, only matching connection peers may supply the header; others use their connection IP. For `X-Forwarded-For`, scan right to left for the first untrusted IP (leftmost if all are trusted); without a list, use the leftmost IP. Other headers accept one IP only. Restart after changes. |

@@ -13,29 +13,18 @@ import (
 	"gpt-load/internal/storage/models"
 )
 
-// hostingRoutes 只注册在已有管理鉴权之下，不允许普通 AccessKey 操作。
-// owner_ref 由可信 Oak 后端提供；浏览器只能访问 Oak 自己的用户接口。
-// 每个操作显式声明方法和路径，不暴露任意管理 API 转发能力。
-// 管理认证在 HTTPModule 外层统一完成，这里不另建认证体系。
-// 普通 AccessKey 只允许既有个人读路由，不能进入该命名空间。
-// 服务部署必须维持回环监听，由 Oak 后端调用。
-// 此管理 Key 拥有全控制面能力，绝不能发送到浏览器。
-// GET 授权查询只读取 Stage，不隐式提交回调。
-// DELETE 授权取消与 DELETE 账号解绑是不同的操作。
-// 创建账号以 pending 返回，激活必须单独显式请求。
-// 模型读取返回受绑定组限制的目录，不能按任意 group_id 查询。
-// 观测读取与手动刷新是两条路由，避免普通流量触发上游查询。
-// 重置查询使用 GET，恢复仍调用原 UUID 的消费接口。
-// 所有变更复用审计中间件，只记录不透明资源引用。
-// 内部契约版本写在路径中，旧版本缺路由应明确失败。
-// 授权回调、创建和消费路由不得被代理自动重试为新操作。
-// 只允许调用方用原幂等标识显式恢复变更请求。
-// 错误返回保留非成功 HTTP 状态，不将故障包装成空列表。
-// 版本路径只描述本契约，不改变数据面的标准协议地址。
-// 数据面仍使用 /v1/responses 和受限内部 Key。
-// 请求来源排序及用户预算不会从此路由接收。
-// 控制面地址应在可信后端配置，不允许普通用户选择目标主机。
-// 跨服务调用超时后调用方应查询原状态，不能预先假定回滚成功。
+// hostingRoutes 仅由挂靠专用模块注册，普通管理员认证不能授权这些动作。
+// owner_ref 必须匹配 New API 针对本次请求核验的用户，不信任调用方自报。
+// 每个动作显式声明方法和路径，不提供任意后台 API 转发能力。
+// 授权、建号和消费继续使用既有持久化操作标识保证幂等。
+// 只有同机可信后端持有断言和内部 Key，不把它们发送到浏览器。
+// 查询不隐式换码、刷新或消费；恢复动作仍要求显式原操作 ID。
+// 数据面协议与每账号受限 Key 不受本次认证拆分影响。
+// 跨服务失败必须显式报告，不能改用公共资源或管理员密钥。
+// 变更审计只记录路由和不透明资源引用，不保留授权回调正文。
+// 成功信封仍沿用 code/data，调用方必须检查业务码。
+// 创建 pending 后须由 New API 持久保存内部 Key，再单独激活。
+// 超时后的查询与重试沿用原幂等标识，不自动新建操作。
 func (s *Server) hostingRoutes() []httproute.Route {
 	routes := []httproute.Route{
 		controlRoute("hosting.authorizations.create", http.MethodPost, "/hosting/v1/authorizations", s.handleHostingBegin),
@@ -113,17 +102,28 @@ func hostingReply(c *gin.Context, data any, err error) {
 
 // 发起授权只接受明确用途，任何同操作 ID 的参数变更都会冲突。
 // 创建响应只返回授权地址和 Stage 摘要，不包含 PKCE verifier。
-// 请求中的 owner_ref 仅可信内网调用者可提供。
+// 请求中的 owner_ref 必须等于已核验的当前用户。
 // Oak 需用当前登录用户生成它，不能透传用户随意填写的值。
 // 浏览器最终只获得必要的授权 URL、时效与 Stage 状态。
 // 响应丢失后同 UUID 重试仍返回同一授权过程。
 // 不能将返回的 localhost 回调误认为 Oak 的公网回调。
+// 解析后的 owner 必须匹配上下文，不能因为签名有效就信任正文里的身份。
+// 匹配后仍显式采用上下文身份，避免未来增加字段转换时引入第二来源。
+// 不匹配时在调用授权服务之前终止，不能留下跨用户 Stage。
+// New API 的核验失败已经在专用认证链关闭，此处只处理业务字段一致性。
+// 不读取普通管理 principal；管理员身份不代表可替任意用户授权。
+// 现有 operation_id 继续决定重放语义，断言短期有效不替代持久幂等。
 func (s *Server) handleHostingBegin(c *gin.Context) {
 	var request HostingAuthorizationRequest
 	if err := bindHostingJSON(c, &request); err != nil {
 		hostingReply(c, nil, err)
 		return
 	}
+	if request.OwnerRef != c.GetString(hostingOwnerContextKey) {
+		hostingReply(c, nil, app_errors.ErrUnauthorized)
+		return
+	}
+	request.OwnerRef = c.GetString(hostingOwnerContextKey)
 	result, err := s.service.BeginHostingAuthorization(c.Request.Context(), request)
 	hostingReply(c, result, err)
 }
@@ -138,10 +138,11 @@ func (s *Server) handleHostingBegin(c *gin.Context) {
 // 重新授权失败时原账号资源继续保留，可再次开始授权。
 // 完整回调含一次性授权码，不记录到普通操作日志。
 // 普通管理 Stage 接口仍限管理员，用户不能绕过 Oak 归属入口。
+// Stage查找和后续动作共享同一个核验主体，不重新读取未受信query。
 func (s *Server) handleHostingStage(c *gin.Context) {
 	ctx := c.Request.Context()
 	stage := c.Param("stage_id")
-	if _, err := s.service.hostingAuthorization(ctx, c.Query("owner_ref"), stage); err != nil {
+	if _, err := s.service.hostingAuthorization(ctx, c.GetString(hostingOwnerContextKey), stage); err != nil {
 		hostingReply(c, nil, err)
 		return
 	}
@@ -173,17 +174,29 @@ func (s *Server) handleHostingStage(c *gin.Context) {
 // 普通账号列表和详情不提供内部 Key 的恢复入口。
 // 本请求不接受测试模型或原厂账号身份的用户声明。
 // 成功表示资源建立成功，不表示真实 Codex 推理已经验收。
+// body归属一致性在服务调用前检查，失败不能触发建组或签发内部Key。
+// 绑定服务仍校验同一用户的Stage，不因身份核验成功而跳过资源归属。
+// 主体身份取自核验上下文，正文只是与既有请求DTO保持一致的声明。
+// 不向调用方返回其他用户是否存在，不匹配统一认证失败。
+// 现有同身份独占与pending状态规则保持不变，不通过认证改造重新授权。
+// 首次响应和幂等响应均经过同一认证边界，不给恢复路径额外豁免。
 func (s *Server) handleHostingCreate(c *gin.Context) {
 	var request HostingCreateRequest
 	if err := bindHostingJSON(c, &request); err != nil {
 		hostingReply(c, nil, err)
 		return
 	}
+	if request.OwnerRef != c.GetString(hostingOwnerContextKey) {
+		hostingReply(c, nil, app_errors.ErrUnauthorized)
+		return
+	}
+	request.OwnerRef = c.GetString(hostingOwnerContextKey)
 	result, err := s.service.CreateHostingAccount(c.Request.Context(), request)
 	hostingReply(c, result, err)
 }
 
 // 用户列表始终带归属查询，管理员全量视图使用已有分组管理页。
+// 查询主体来自已核验上下文，原query值仅由中间件用于一致性检查。
 // 不返回软删除账号，也不向列表添加任何内部 Key。
 // 查询先限定 owner_ref，不能先全量取出再依赖前端过滤。
 // 返回顺序按创建时间稳定，用户调用优先级由 Oak 另行保存。
@@ -193,7 +206,7 @@ func (s *Server) handleHostingCreate(c *gin.Context) {
 // 列表不分页的首期边界依赖 Oak 对每用户账号数的上限。
 // 用户别名原样作为数据返回，前端须按文本渲染。
 func (s *Server) handleHostingList(c *gin.Context) {
-	owner := c.Query("owner_ref")
+	owner := c.GetString(hostingOwnerContextKey)
 	if !validHostingRef(owner) {
 		hostingReply(c, nil, app_errors.ErrValidation)
 		return
@@ -237,7 +250,8 @@ func (s *Server) handleHostingList(c *gin.Context) {
 // 业务用户安全摘要应由 Oak 再次投影，禁止透传内部资源关系。
 func (s *Server) handleHostingAccount(c *gin.Context) {
 	ctx := c.Request.Context()
-	owner, account := c.Query("owner_ref"), c.Param("account_ref")
+	// 先以核验主体限定账号，再读取状态或调用原厂动作。
+	owner, account := c.GetString(hostingOwnerContextKey), c.Param("account_ref")
 	binding, err := s.service.lookupHosting(ctx, owner, account)
 	if err != nil {
 		hostingReply(c, nil, err)

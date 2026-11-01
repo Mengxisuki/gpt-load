@@ -5,22 +5,43 @@
 ## 代码导航与配置
 
 - `internal/control/hosting.go`：授权归属、幂等建号、激活、暂停、重授权和解绑。
-- `internal/control/hosting_http.go`：受管理认证保护的内部接口、脱敏审计。
+- `internal/control/hosting_http.go`：受用户请求断言保护的内部接口、脱敏审计。
+- `internal/control/hosting_auth.go`：独立挂靠认证模块、回环身份核验和请求归属绑定。
 - `internal/storage/models/hosting.go`、`migrations/0032_hosting.go`：绑定与授权表、数据库迁移。
 - `internal/state/hosting.go`：调度、普通/Codex 目录、WebSocket、个人模型视图共用的权限入口。
 - `internal/state/loader/hosting.go`：启动和所有配置发布前校验绑定、唯一身份与内部 Key。
 - `internal/subscription/providers/codex/driver.go`：复用原厂额度/重置驱动，补独立卡详情状态。
 - `web/src/frontends/modern/features/groups/`：资源分类、归属引用搜索与展示。
 
-沿用既有 `AUTH_KEY` 管理认证和单实例部署，gpt-load 继续仅监听 `127.0.0.1:3001`。无新增第三方服务、依赖或环境变量。`AUTH_KEY` 和内部 Key 只由可信后端持有，不能给用户浏览器。部署配置见 [Oak 部署说明](../deploy/oak/README.md)。
+gpt-load 继续仅监听 `127.0.0.1:3001`。普通管理界面和管理 API 沿用 `AUTH_KEY`；`/api/hosting/v1/*` 使用独立用户请求断言，拒绝管理 Key、普通 AccessKey 和用户登录 JWT。New API 不需要持有 gpt-load 管理密钥，也不向 gpt-load 共享自身 `CRYPTO_SECRET`。账号内部受限 Key 继续仅由可信后端持有，不能给用户浏览器。
+
+新增非秘密配置 `OAK_NEW_API_URL`，默认 `http://127.0.0.1:3000`，只允许 HTTP/HTTPS 字面回环地址，禁止 DNS、路径、查询和用户信息。配置在启动时读取，错误只使挂靠不可用。部署配置见 [Oak 部署说明](../deploy/oak/README.md)。
 
 ## 公共约定
 
-前缀 `/api/hosting/v1`，请求头 `Authorization: Bearer <AUTH_KEY>`，成功信封 `{ "code": 0, "data": ... }`。错误使用已有 HTTP 状态码和 `code/message`；调用者不能只看 HTTP 200。敏感响应设置 no-store，变更记录仅包含路由、不透明资源引用和成败，不记录 OAuth 回调和 Key。
+前缀 `/api/hosting/v1`，请求头 `Authorization: Bearer <短期挂靠请求断言>`，成功信封 `{ "code": 0, "data": ... }`。错误使用已有 HTTP 状态码和 `code/message`；调用者不能只看 HTTP 200。敏感响应设置 no-store，变更记录仅包含路由、不透明资源引用和成败，不记录 OAuth 回调和 Key。
 
 `owner_ref` 是 Oak 后端从登录身份生成的引用，例如 `oak:1`；`account_ref` 在授权开始前分配。两者最长 128 字符，仅允许 ASCII 字母、数字、`-`、`_`、`:`。操作 UUID 必须满足现有 UUID v4 校验。除创建/授权 body 外，所有资源动作通过 query 传 `owner_ref`。
 
-服务端每次同时匹配 owner/account 或 owner/stage，其他用户与不存在资源统一返回不存在。普通数据面 AccessKey 无权访问这些管理路由。
+### 用户请求断言
+
+New API 沿用自己的用户会话、权限和敏感操作校验，以自身持久 `CRYPTO_SECRET` 域隔离签发有效期 30 秒的断言。gpt-load 本地只做负向格式筛选（JWT 三段、`alg=HS256`、`typ=oak-hosting-request+jwt`、最多 4096 字节），并拒绝与当前管理 Key 相同的字串；这些筛选不授予身份。它把实际收到的请求字段发往固定回环验证端：
+
+```http
+POST /api/internal/hosting/verify-request
+Authorization: Bearer <同一个断言>
+Content-Type: application/json
+
+{"method":"GET","request_uri":"/api/hosting/v1/accounts?owner_ref=oak%3A1","body_sha256":"<原始请求体SHA256小写十六进制>","idempotency_key":""}
+```
+
+New API 验签、校验签发方/受众/用途/时效和当前用户状态，成功返回 HTTP 200 `{"success":true,"data":{"owner_ref":"oak:1"}}`。gpt-load 业务只采用核验后的 owner，query/body 的 owner 声明必须一致；query 重复值也拒绝。`request_uri` 保留原转义及完整查询串，正文按原始字节哈希，空体也必须计算哈希。
+
+核验客户端禁用环境代理与重定向，总超时 3 秒；挂靠请求体上限 16 KiB，核验响应上限 4 KiB。401/403 统一作为身份拒绝，断连、5xx、重定向、畸形/超大响应返回 `503 HOSTING_VERIFICATION_UNAVAILABLE`，不会进入业务或改用管理 Key。失败审计不记录断言、原厂回调和响应正文。普通管理路由不会接受挂靠断言。
+
+核验只读、不消费 nonce；30 秒内相同断言可以重复验证。写动作仍依赖原有 operation UUID 持久幂等，此断言不能描述为一次性消费票据。数据面每账号受限 Key 和模型调用隔离不变。
+
+服务端每次同时匹配 owner/account 或 owner/stage，其他用户与不存在资源统一返回不存在。普通数据面 AccessKey 无权访问这些挂靠路由。
 
 ## 授权与建号
 
@@ -97,7 +118,7 @@ Stage DTO 为 `{stage_id,status,authorization_method?,authorization_url?,redirec
 
 ## 运维与验证
 
-先发布含迁移 0032 和私有门禁的 gpt-load，再发布兼容 New API。开启入口前检查管理 API 版本、回环绑定、两服务数据及密钥成套备份和恢复。旧 gpt-load 不支持契约应明确不可用，不回退到公共组/管理 Key 执行。迁移后不能只换旧二进制回滚。
+两服务必须同时支持本页断言契约：先发布带内部验证端的 New API，再发布专用挂靠认证的 gpt-load；中间窗口挂靠明确不可用，不提供管理密钥兼容回退。已有数据库无需新增迁移。首次安装仍需执行现有 0032 私有绑定迁移。开启入口前检查管理 API 版本、回环绑定、两服务数据及密钥成套备份和恢复。旧 gpt-load 不支持契约应明确不可用，不回退到公共组/管理 Key 执行。迁移后不能只换旧二进制回滚。
 
 本地验证：
 
@@ -112,3 +133,7 @@ pnpm run build
 全量 Go、vet、Node 24.22.1 下前端 lint/类型/构建通过。Docker Compose 使用隔离 2.39.4，系统旧版不支持既有测试的 `--no-env-resolution`；该工具配置仅在本机临时目录，非项目运行依赖。新增测试覆盖生命周期、同身份冲突、全量/他人 Key 隔离、真实 HTTP 鉴权、纯读重置结果、未决解绑、暂停激活重放、重授权资源稳定、首次授权导入保护、卡子状态、SQLite/MySQL/PostgreSQL 新安装、升级与重放。网关模拟外部执行器验证无权请求的执行次数为零。外部迁移测试 `TestExternalHostingMigrationContract` 通过 URL 格式的 `GPT_LOAD_DATABASE_TEST_DSN` 显式启用（不接受 PostgreSQL 的 key=value 或 MySQL 原生 DSN），使用既有 helper 创建和清理独立随机 MySQL 数据库/PostgreSQL schema，不修改原业务表，不输出 DSN。
 
 未验证：真实厂商 OAuth/出口/推理、真实 Codex CLI 的流式与工具/compact、真实消费重置机会、线上容量与备份恢复。本轮未提交、推送或部署。
+
+本次鉴权修正参考 OWASP ASVS 5.0.0 的 V6.8.2、V8.3.2、V9.1.1、V9.2.2/V9.2.3 与 V16.3.2，以及 [Authentication](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)、[Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)、[Authorization](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) 指南。本地回归验证请求字段篡改、归属不一致、凭据不转发、管理员反向隔离和核验失败关闭；真实签名与过期由 New API 的验证器测试负责。本实现针对同机回环部署，不声明完整 ASVS 合规认证。
+
+本次认证修正实际复验：全量 `go test ./... -count=1 -timeout=180s`（上述隔离 Docker 工具配置）、`go vet ./...`、`go build -o /tmp/oak-gpt-load-auth .` 与 diff 检查通过。未修改数据库结构、前端或数据面。额外定向 `-race` 因本机资源压力在依赖编译阶段主动停止，未完成，不能报告通过或代码测试失败；本次未重跑前端及外部数据库矩阵。跨服务真实 HTTP 断言联调由 New API 侧另记结果。

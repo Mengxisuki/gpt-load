@@ -2,13 +2,18 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,7 +214,7 @@ func TestHostingDuplicateIdentityAndFileImportBoundary(t *testing.T) {
 // 内网 HTTP 接口真实测试权限和结果查询，GET 绝不调用消费函数。
 // 未决消费解绑保留资源并停用 Key，才能安全续办同一个 UUID。
 // 使用真实 Gin 注册和管理认证链，不直接调用 handler 绕过鉴权。
-// 管理员凭据允许请求，但仍须携带正确的 owner_ref。
+// 挂靠断言允许本人请求；管理员凭据不具有此命名空间的权限。
 // 另一个 owner 请求相同账号应得到资源不存在。
 // 专属数据面 Key 也无管理接口权限，不能读取重置操作。
 // 未提供任何凭据时应拒绝认证，避免开放内部状态查询。
@@ -221,6 +226,16 @@ func TestHostingDuplicateIdentityAndFileImportBoundary(t *testing.T) {
 // 测试没有创建新 UUID 重试消费，也不把 unknown 当作未消费。
 // HTTP 响应校验覆盖状态码和安全结果正文。
 // 这些行为与真实账号是否具有重置机会无关，因此可离线稳定复现。
+// 核验桩只接受两名测试用户的专用断言，不接受管理员Key。
+// 两名用户都能通过身份验证，但只有资源所有者能读到重置结果。
+// 他人请求得到404，避免确认账号或未决操作是否存在。
+// 私有内部Key是真实建号返回值，用来覆盖数据面凭据的用途隔离。
+// 列表之外的重置查询也必须接入新模块，不能保留旧管理认证路径。
+// 认证和业务查询使用同一个注册器，覆盖生产模块组合方式。
+// 默认断言核验只读，不会改变预置的outcome_unknown状态。
+// 未决解绑的停用行为由原服务执行，不由新认证层模拟。
+// Stage换码仍用厂商桩，测试不需要用户登录或访问原厂网络。
+// 凭据继续保留的断言避免误把“删除请求失败”实现成部分数据删除。
 func TestHostingHTTPResetReadAndDeleteGuard(t *testing.T) {
 	fixture := newServiceFixture(t)
 	stage := hostingTestAuthorization(t, fixture, "oak:1", "reset-account", "reset-id", resetCreditTestKey, "connect")
@@ -236,12 +251,27 @@ func TestHostingHTTPResetReadAndDeleteGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	initControlI18n(t)
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		owner := ""
+		for _, candidate := range []string{"oak:1", "oak:2"} {
+			if r.Header.Get("Authorization") == "Bearer "+hostingTestAssertion(candidate) {
+				owner = candidate
+			}
+		}
+		if owner != "oak:1" && owner != "oak:2" {
+			w.WriteHeader(401)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]string{"owner_ref": owner}})
+	}))
+	defer verifier.Close()
+	t.Setenv("OAK_NEW_API_URL", verifier.URL)
 	engine := gin.New()
 	NewServer(&config.Config{AuthKey: "test-admin"}, fixture.service).RegisterRoutes(engine)
 	for _, test := range []struct {
 		owner, key string
 		status     int
-	}{{"oak:1", "test-admin", 200}, {"oak:2", "test-admin", 404}, {"oak:1", account.InternalKey, 403}, {"oak:1", "", 401}} {
+	}{{"oak:1", hostingTestAssertion("oak:1"), 200}, {"oak:2", hostingTestAssertion("oak:2"), 404}, {"oak:1", "test-admin", 401}, {"oak:1", account.InternalKey, 401}, {"oak:1", "", 401}} {
 		request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/hosting/v1/accounts/reset-account/reset-operations/%s?owner_ref=%s", resetCreditTestKey, url.QueryEscape(test.owner)), nil)
 		if test.key != "" {
 			request.Header.Set("Authorization", "Bearer "+test.key)
@@ -367,4 +397,261 @@ func TestHostingPendingAuthorizationProtectsImports(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Code != "HOSTING_BROWSER_AUTH_REQUIRED" {
 		t.Fatalf("pending import protection: %v", err)
 	}
+}
+
+// 真实路由链只替换外部 New API 核验服务，不替换本地鉴权和归属逻辑。
+// 核验桩按已签请求快照检查字段，确保发送的是实际方法、URI 和原始字节摘要。
+// 短期断言与普通后台、数据面凭据分别测试，不能混用权限域。
+// 过期和伪造令牌由身份服务拒绝；本层必须将拒绝传播到业务入口之前。
+// 请求字节被更改时即使 JSON 意义类似也不能通过原断言。
+// 归属匹配另设“核验成功但请求 owner 错误”，证明不是只依赖外部桩隔离。
+// 所有测试使用隔离数据库和回环端口，不读取或修改生产账号。
+// URL中的冒号使用百分号转义，用来发现核验前擅自重编码的错误。
+// read断言只授权GET列表，改成POST即使路径相同也应失效。
+// POST列表路径有真实建号路由，方法篡改不会被405提前挡住。
+// 不存在的方法由通用注册器终止，不能用其405假冒认证回归通过。
+// 修改账号路径测试资源定位同样受签名请求URI约束。
+// GET附加正文测试空体哈希不能被简单忽略。
+// 修改幂等头测试消费重试标识不能脱离原请求断言。
+// wrong-query断言专门返回与query不同的用户，覆盖本地再次比对。
+// duplicate-query即使两个值相同也拒绝，固定唯一解析语义。
+// 授权和创建的owner在body中，两个入口分别覆盖，避免只修列表读取。
+// 普通后台会话路由作为反向边界，挂靠断言不能充当管理员。
+// 原管理员成功用例确保隔离没有顺便破坏既有登录。
+// 临时失败不做数据库清理或状态修复，业务不应在认证前执行。
+// 回调阶段和真实原厂限额不在这个请求认证测试的责任内。
+func TestHostingRequestVerificationIsolation(t *testing.T) {
+	fixture := newServiceFixture(t)
+	initControlI18n(t)
+	type assertion struct {
+		request hostingVerificationRequest
+		owner   string
+	}
+	// 这里保存的是外部核验服务的预期输入，不实现 JWT 的签发或验证算法。
+	// 真正的过期、域隔离和签名回归由 New API 验证器负责。
+	tickets := map[string]assertion{}
+	add := func(token, method, uri, body, key, owner string) {
+		digest := sha256.Sum256([]byte(body))
+		tickets[hostingTestAssertion(token)] = assertion{hostingVerificationRequest{method, uri, hex.EncodeToString(digest[:]), key}, owner}
+	}
+	listURI := "/api/hosting/v1/accounts?owner_ref=oak%3A1"
+	add("read", "GET", listURI, "", "", "oak:1")
+	add("wrong-query", "GET", "/api/hosting/v1/accounts?owner_ref=oak%3A2", "", "", "oak:1")
+	add("duplicate-query", "GET", listURI+"&owner_ref=oak%3A1", "", "", "oak:1")
+	add("post", "POST", "/api/hosting/v1/authorizations", `{"owner_ref":"oak:2"}`, "original-key", "oak:1")
+	add("create", "POST", "/api/hosting/v1/accounts", `{"owner_ref":"oak:2"}`, "", "oak:1")
+	// 验证服务收到的字段必须完整相等，任一不匹配统一返回401。
+	// 校验端不返回“不匹配的哪一项”，防止调用方获得令牌内部信息。
+	var verificationCalls atomic.Int64
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		verificationCalls.Add(1)
+		if r.Method != "POST" || r.URL.RequestURI() != "/api/internal/hosting/verify-request" {
+			t.Error("unexpected verification target")
+			w.WriteHeader(500)
+			return
+		}
+		var got hostingVerificationRequest
+		want, ok := tickets[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if json.NewDecoder(r.Body).Decode(&got) != nil || !ok || got != want.request {
+			w.WriteHeader(401)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]string{"owner_ref": want.owner}})
+	}))
+	defer verifier.Close()
+	t.Setenv("OAK_NEW_API_URL", verifier.URL)
+	engine := gin.New()
+	NewServer(&config.Config{AuthKey: "test-admin"}, fixture.service).RegisterRoutes(engine)
+	// GET成功是完整公开行为验证，其他变体均不得获得账号列表或创建 Stage。
+	// 创建和授权正文均检查已核验 owner，不能自报别人的归属。
+	for _, tc := range []struct {
+		name, token, method, uri, body, key string
+		status                              int
+	}{
+		{"valid", "read", "GET", listURI, "", "", 200},
+		{"tampered-owner", "read", "GET", "/api/hosting/v1/accounts?owner_ref=oak%3A2", "", "", 401},
+		{"tampered-path", "read", "GET", "/api/hosting/v1/accounts/other?owner_ref=oak%3A1", "", "", 401},
+		{"tampered-method", "read", "POST", listURI, "", "", 401},
+		{"tampered-body", "read", "GET", listURI, "{}", "", 401},
+		{"tampered-idempotency", "read", "GET", listURI, "", "changed", 401},
+		{"wrong-query-owner", "wrong-query", "GET", "/api/hosting/v1/accounts?owner_ref=oak%3A2", "", "", 401},
+		{"duplicate-query-owner", "duplicate-query", "GET", listURI + "&owner_ref=oak%3A1", "", "", 401},
+		{"wrong-body-owner", "post", "POST", "/api/hosting/v1/authorizations", `{"owner_ref":"oak:2"}`, "original-key", 401},
+		{"wrong-create-owner", "create", "POST", "/api/hosting/v1/accounts", `{"owner_ref":"oak:2"}`, "", 401},
+		{"expired", "expired", "GET", listURI, "", "", 401},
+		{"admin", "test-admin", "GET", listURI, "", "", 401},
+		{"login-jwt", "ordinary-login-jwt", "GET", listURI, "", "", 401},
+		{"access-key", "ordinary-access-key", "GET", listURI, "", "", 401},
+		{"assertion-not-admin", "read", "GET", "/api/auth/session", "", "", 401},
+		{"admin-unchanged", "test-admin", "GET", "/api/auth/session", "", "", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.uri, strings.NewReader(tc.body))
+			token := tc.token
+			switch tc.token {
+			case "test-admin", "ordinary-access-key":
+			case "ordinary-login-jwt":
+				token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.signature"
+			default:
+				token = hostingTestAssertion(tc.token)
+			}
+			before := verificationCalls.Load()
+			req.Header.Set("Authorization", "Bearer "+token)
+			if tc.key != "" {
+				req.Header.Set("Idempotency-Key", tc.key)
+			}
+			result := httptest.NewRecorder()
+			engine.ServeHTTP(result, req)
+			if result.Code != tc.status {
+				t.Fatalf("status=%d want=%d body=%s", result.Code, tc.status, result.Body)
+			}
+			if (tc.name == "admin" || tc.name == "login-jwt" || tc.name == "access-key" || tc.name == "assertion-not-admin") && verificationCalls.Load() != before {
+				t.Fatal("unrelated credential sent to verifier")
+			}
+		})
+	}
+
+	// 格式过滤是负向门禁：字段缺失、坏Base64、非JSON和错误算法均不出网。
+	// 4096字节限制在解析前执行，不能让超长令牌穿过前端代理进入验证器。
+	// 每个请求比较核验计数，明确证明敏感凭据没有被转发。
+	// 有效外形但恰好等于管理员密钥时也必须在本地拒绝。
+	// 算法为RS256但用途相同仍拒绝，不能让服务间算法协商扩大信任域。
+	// 空payload与坏头部各走独立格式检查，均不触发远端验证。
+	// JSON null不是可用JWT头部，即使解析无错误也缺少必需类型。
+	// 测试令牌最大长度以整个Bearer值计量，不只限制header段。
+	// 特殊管理员用新的Server实例，避免修改运行时密钥摘要自证。
+	// 原子计数跨HTTP服务goroutine观察网络调用，兼容竞态检测。
+	// 请求完成后检查次数，不依赖等待或猜测异步调用已经结束。
+	// 测试数据从不含真实管理员秘密，失败信息也不回显令牌。
+	// 这些检查不依赖外部核验桩的返回值，避免“发出去再拒绝”的假通过。
+	for _, token := range []string{"broken", "%%%.e30.signature", "e30..signature", "bnVsbA.e30.signature", "eyJhbGciOiJSUzI1NiIsInR5cCI6Im9hay1ob3N0aW5nLXJlcXVlc3Qrand0In0.e30.signature", strings.Repeat("a", 4097)} {
+		before := verificationCalls.Load()
+		req := httptest.NewRequest("GET", listURI, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		result := httptest.NewRecorder()
+		engine.ServeHTTP(result, req)
+		if result.Code != 401 || verificationCalls.Load() != before {
+			t.Fatal("invalid format forwarded")
+		}
+	}
+	shapedAdmin := hostingTestAssertion("shaped-admin")
+	adminEngine := gin.New()
+	NewServer(&config.Config{AuthKey: shapedAdmin}, fixture.service).RegisterRoutes(adminEngine)
+	before := verificationCalls.Load()
+	req := httptest.NewRequest("GET", listURI, nil)
+	req.Header.Set("Authorization", "Bearer "+shapedAdmin)
+	result := httptest.NewRecorder()
+	adminEngine.ServeHTTP(result, req)
+	if result.Code != 401 || verificationCalls.Load() != before {
+		t.Fatal("administrator secret forwarded")
+	}
+	// 所有被拒绝的创建入口不能留下未授权的持久 Stage。
+	// 断言签名正确也不足以跨用户访问，业务归属仍由服务层查询约束。
+	var count int64
+	if err := fixture.db.Model(&models.HostingAuthorization{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("unauthorized stage persisted: %d %v", count, err)
+	}
+}
+
+// 身份服务故障时挂靠保持关闭，不能把未知结果当认证成功。
+// 重定向和环境代理均不能把断言发向配置以外的地址。
+// 响应限长覆盖有效JSON加大量空白，避免只限制解码对象而漏掉尾部。
+// 无效配置在路由创建时捕获，普通后台服务仍能运行。
+// 所有异常返回固定错误码，不回显外部服务正文和断言。
+// 401代表用户断言未获认证；500代表核验服务基础设施失败。
+// 本层将基础设施故障映射503，让调用者区分身份拒绝和服务不可用。
+// 不把核验端的错误JSON当业务成功，不接受错误码包装下的data。
+// 302用同机捕获服务验证没有跟随重定向，避免测试实际访问外网。
+// malformed覆盖HTTP成功但正文不可解析，不能静默返回空账号列表。
+// success:false覆盖只检查HTTP状态的错误实现。
+// 缺失owner覆盖成功标志存在但没有可授权身份的情况。
+// 超长响应在完整读取上限处拒绝，不能忽略大量尾随空白。
+// 失联端口使用已关闭测试服务器，不依赖开发机固定空闲端口。
+// 因超时与断连共用网络错误分支，这里用即时拒绝连接稳定复现关闭。
+// 单测不睡眠等待三秒，实际总超时由http.Client配置保证。
+// 无效配置测试不启网络服务，以保证错误目标不会收到请求。
+// localhost与公网字面IP都拒绝，分别覆盖名字解析和地址边界。
+// 用户信息、路径、查询、fragment是独立限制，逐项覆盖。
+// HTTP和HTTPS代理环境均设置为捕获端点，核验客户端不读取它们。
+// 此测试不模拟TLS握手，也不宣称跨主机传输已经验证。
+// 失败响应中加入虚构秘密标记，确认对客户端错误输出已脱敏。
+// 捕获端点计数最终必须为零，任何额外访问都使回归失败。
+// 所有子例新建路由以读取各自配置，符合生产只在启动时配置的行为。
+// 本地测试的临时身份服务仅代表外部边界，不取代New API密码学测试。
+func TestHostingVerificationFailsClosed(t *testing.T) {
+	initControlI18n(t)
+	fixture := newServiceFixture(t)
+	var redirected atomic.Int64
+	trap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { redirected.Add(1); w.WriteHeader(200) }))
+	defer trap.Close()
+	// 即便进程环境设置了代理，此内部验证客户端也不应调用它。
+	// 回环地址在系统代理中通常有例外，本测试仍与配置字段静态检查共同覆盖。
+	t.Setenv("HTTP_PROXY", trap.URL)
+	t.Setenv("HTTPS_PROXY", trap.URL)
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"rejected", 401, `{"secret":"not-for-client"}`},
+		{"failed", 500, `{"secret":"not-for-client"}`},
+		{"redirect", 302, ""},
+		{"malformed", 200, "broken-json"},
+		{"false", 200, `{"success":false}`},
+		{"missing-owner", 200, `{"success":true,"data":{}}`},
+		{"oversized", 200, `{"success":true,"data":{"owner_ref":"oak:1"}}` + strings.Repeat(" ", 4096)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", trap.URL)
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer verifier.Close()
+			t.Setenv("OAK_NEW_API_URL", verifier.URL)
+			engine := gin.New()
+			NewServer(&config.Config{AuthKey: "admin"}, fixture.service).RegisterRoutes(engine)
+			req := httptest.NewRequest("GET", "/api/hosting/v1/accounts?owner_ref=oak%3A1", nil)
+			req.Header.Set("Authorization", "Bearer "+hostingTestAssertion("failure"))
+			result := httptest.NewRecorder()
+			engine.ServeHTTP(result, req)
+			want := 503
+			if tc.status == 401 {
+				want = 401
+			}
+			if result.Code != want || strings.Contains(result.Body.String(), "not-for-client") {
+				t.Fatalf("unsafe verification response: %d %s", result.Code, result.Body)
+			}
+		})
+	}
+	// 非回环目标和URI附加内容必须在发起网络调用前拒绝。
+	// localhost 被拒是为了避免DNS和hosts映射改变固定身份服务。
+	for _, endpoint := range []string{"http://localhost:3000", "http://192.0.2.1:3000", "http://127.0.0.1:3000/path", "http://127.0.0.1:3000?x=1", "http://user@127.0.0.1:3000", "http://127.0.0.1:3000#x"} {
+		t.Setenv("OAK_NEW_API_URL", endpoint)
+		if _, err := hostingVerificationURL(); err == nil {
+			t.Errorf("unsafe endpoint accepted: %s", endpoint)
+		}
+	}
+	// 已关闭的回环端口模拟身份服务停止，不能回退到管理员认证。
+	stopped := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	stopped.Close()
+	t.Setenv("OAK_NEW_API_URL", stopped.URL)
+	engine := gin.New()
+	NewServer(&config.Config{AuthKey: "admin"}, fixture.service).RegisterRoutes(engine)
+	req := httptest.NewRequest("GET", "/api/hosting/v1/accounts?owner_ref=oak%3A1", nil)
+	req.Header.Set("Authorization", "Bearer "+hostingTestAssertion("failure"))
+	result := httptest.NewRecorder()
+	engine.ServeHTTP(result, req)
+	if result.Code != 503 || redirected.Load() != 0 {
+		t.Fatalf("fail-open or redirect: status=%d redirected=%d", result.Code, redirected.Load())
+	}
+}
+
+// 测试只构造专用头部与虚构签名，不在执行层复制真实签发逻辑。
+// payload标签供外部核验桩定位预期请求，不代表可受信的用户身份。
+// 签名字段刻意无效，只有测试中的回环桩接受；真实New API必须拒绝。
+// 普通凭据用例不经过此函数，证明本地筛选在网络调用前生效。
+func hostingTestAssertion(label string) string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"oak-hosting-request+jwt"}`))
+	return header + "." + base64.RawURLEncoding.EncodeToString([]byte(label)) + ".signature"
 }

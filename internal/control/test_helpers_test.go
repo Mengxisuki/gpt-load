@@ -86,7 +86,7 @@ func createGroupWithCredentials(t *testing.T, fixture serviceFixture, credential
 // RegisterRoutes keeps package tests concise while production registration
 // remains exclusively owned by the shared HTTP route registry.
 func (s *Server) RegisterRoutes(engine *gin.Engine) {
-	registry, err := httproute.NewRegistry(s.HTTPModule())
+	registry, err := httproute.NewRegistry(s.HTTPModule(), s.HostingHTTPModule())
 	if err != nil {
 		panic(err)
 	}

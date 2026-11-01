@@ -374,6 +374,11 @@ func newHTTPRegistry(
 	return httproute.NewRegistry(
 		app.HTTPModule(),
 		controlServer.HTTPModule(),
+		// 挂靠使用 New API 用户断言，与管理员凭据隔离。
+		// 同一注册器覆盖真实生产入口，不能只在测试辅助路由启用隔离。
+		// 普通控制面与数据面各自保留原认证器，不接受跨用途凭据。
+		// 独立命名空间仍遵循通用注册器的路由冲突与404/405规则。
+		controlServer.HostingHTTPModule(),
 		gatewayHandler.HTTPModule(),
 		webUIServer.HTTPModule(),
 	)
