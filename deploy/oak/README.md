@@ -41,7 +41,7 @@ git merge upstream-main
 git push origin oak
 ```
 
-GitHub 默认分支应设为 `oak`，这样手动 workflow 入口与日常 PR 基准都落在开发分支。既有上游工作流保持原样；本 fork 的独立工作流使用 GitHub 托管 Ubuntu Runner，不依赖官方私有 self-hosted Runner。
+GitHub 默认分支已设为 `oak`，手动 workflow 入口与日常 PR 基准都落在开发分支。既有上游工作流保持原样；本 fork 的独立工作流使用 GitHub 托管 Ubuntu Runner，不依赖官方私有 self-hosted Runner。
 
 ## 服务器布局
 
@@ -74,6 +74,8 @@ GitHub 默认分支应设为 `oak`，这样手动 workflow 入口与日常 PR �
 5. `known_hosts` 通过既有受信 `ssh wdm` 获取。Ed25519 指纹为 `SHA256:PEA/ySV7KRfOg+4Gkq2AeB1wGeVvvXucaGPt7rOa6bg`，不得关闭主机校验或扫描后盲目信任。
 
 只有实际 workflow 构建及部署成功，才算 CI/CD 已接通；仅有文件、分支和 Secret 不代表运行成功。
+
+2026-11-01 已完成首次真实自动发布：[运行 41287052506](https://github.com/Mengxisuki/gpt-load/actions/runs/41287052506)。`oak-production` 已启用只允许 `oak` 的分支策略，环境 Secret 已通过用户授权的 GitHub CLI 录入。服务器版本、备份中的管理/加密密钥一致性、SQLite完整性和应用无法覆写程序均已核对；未来运行版本以 `/health` 及对应 Actions 结果为准。
 
 ## 发布与失败恢复
 
