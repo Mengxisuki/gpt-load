@@ -289,9 +289,8 @@ func (s *Server) handleHostingAccount(c *gin.Context) {
 			hostingReply(c, nil, err)
 			return
 		}
-		result, err := s.service.TestGroupCredential(ctx, binding.GroupID, binding.CredentialID, request)
-		// 恢复 proof 属于管理动作，不需要发送给 Oak 普通用户。
-		result.RestoreProof = nil
+		// 订阅账号使用原生 Responses 测试，不能进入 API-Key 专用探测。
+		result, err := s.service.TestHostingAccount(ctx, owner, account, request)
 		hostingReply(c, result, err)
 	case strings.HasSuffix(path, "/reset-credits/consume"):
 		if err := bindOptionalEmptyJSONObject(c); err != nil {

@@ -19,3 +19,12 @@
 修复：普通/Codex 目录、WebSocket 建连和续轮、个人模型视图统一调用 `ConfigSnapshot.AllowsGroup`。消费只在操作建立前与解绑串行；prepared 持久化后由数据库未决状态阻止删除，释放互斥允许成功结果查询和重放。测试见 `TestHandlerHostingPreventsUnownedExecution`、`TestHostingVisibleModels`、`TestConsumeCredentialResetCreditReplayReportsPendingWhileObservationRefreshRuns`、`TestHostingHTTPResetReadAndDeleteGuard`。
 
 适用边界：当前单实例 gpt-load 挂靠执行。测试替换外部 HTTP/执行器，未验证真实原厂消费；不能把本地幂等测试当作厂商行为承诺。
+
+
+## 2026-11-01 18:53:12 +00:00 — Codex 挂靠测试不能复用普通凭据 Probe
+
+现象：New API 调用挂靠 `accounts/:ref/test` 返回 `hosting_control_rejected`；执行层真实 HTTP 回归稳定复现 403。根因是 `hosting_http.go` 错误调用 `TestGroupCredential`，该入口明确拒绝订阅组；而 Codex 执行器也未声明 `OperationProbe`，只去掉门禁仍不能正确测试。
+
+修复：挂靠入口独立使用 `TestHostingAccount` 构造最小原生 `ResponsesCreate`，指定所属账号和目录内模型，保留凭据准备/刷新、网络设置、安全结果分类及原通用探测禁令。暂停/删除账号和非本人请求在执行前拒绝，不返回恢复 proof，不重试上游失败。
+
+验证：`TestHostingHTTPAccountProbeUsesSubscriptionResponses` 先红后绿，覆盖真实 HTTP 归属、请求契约、401/429/超时、暂停/删除零执行，并将入口实际 AttemptSpec 送入真实 CPA/凭据管理器，只隔离 HTTP transport。control、CPA、subscription 回归、vet 与构建通过。无数据库行为或认证契约变更，未部署或调用真实原厂；真实模型可用性仍需上线后验收。

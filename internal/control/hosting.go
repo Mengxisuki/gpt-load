@@ -438,7 +438,7 @@ func (s *Service) hostingIdentityAvailable(tx *gorm.DB, fingerprint string, ownG
 // 本函数不修改凭据健康，授权失效仍需重新授权。
 // 备注修改不触发厂商调用，也不改变用户归属。
 // 快照发布失败向调用方返回错误，不能报告成功。
-// 暂停账号仍可查看额度、测试和处理已有重置操作。
+// 暂停账号仍可查看额度和处理已有重置操作，推理测试需先显式恢复。
 // 独立的上游限额状态由观测返回，不写入业务启停状态。
 func (s *Service) UpdateHostingAccount(ctx context.Context, owner, account string, request HostingUpdateRequest, activate bool) (HostingAccount, error) {
 	s.hostingMu.Lock()

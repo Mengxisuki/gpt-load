@@ -19,14 +19,209 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gpt-load/internal/channel"
+	"gpt-load/internal/execution"
+	"gpt-load/internal/execution/cpa"
+	"gpt-load/internal/outboundproxy"
 	"gpt-load/internal/platform/config"
 	app_errors "gpt-load/internal/platform/errors"
 	"gpt-load/internal/protocol"
 	"gpt-load/internal/scheduler"
 	"gpt-load/internal/state"
 	"gpt-load/internal/storage/models"
+	"gpt-load/internal/subscription"
 	"gpt-load/internal/subscription/providers/codex"
 )
+
+// 测试传输层仅消费请求并返回固定 Responses 完成事件，不访问真实厂商。
+// 通过函数接收器保留 HTTP 请求断言，复用真实 CPA 转换和凭据准备。
+type hostingProbeTransport func(*http.Request) (*http.Response, error)
+
+// 不提供默认网络回退，未预期的请求也只能进入当前测试函数。
+// 原样传递模拟传输错误，让适配器负责转换失败结果。
+func (transport hostingProbeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+// 挂靠连接测试必须发起本人账号的 Responses 请求，不能走 API-Key 专用探测。
+// 通过真实 HTTP 路由、授权状态机和数据库构造账号，仅替换厂商网络执行器。
+// 回归起点是合法挂靠请求返回 403，不能通过放开普通订阅 Probe 门禁来修复。
+// 本例覆盖控制 HTTP 与执行规格；真实原厂可用性不属于离线测试结论。
+// 普通组的订阅禁令由已有回归独立覆盖，本测试不修改或替代该权限边界。
+// 所有凭据均来自本测试的固定虚构身份，不读取开发者本地授权文件。
+// 授权目录只有一个模型，使模型范围断言不依赖外部模型更新。
+func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
+	fixture := newServiceFixture(t)
+	stage := hostingTestAuthorization(t, fixture, "oak:1", "probe-account", "probe-id", resetCreditTestKey, "connect")
+	account, err := fixture.service.CreateHostingAccount(t.Context(), HostingCreateRequest{OwnerRef: "oak:1", AccountRef: "probe-account", OperationID: resetCreditTestKey, StageID: stage.StageID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 激活使用真实服务；测试入口不负责替用户恢复暂停或修改账号状态。
+	// 执行层激活只表示内部 Key 已可靠保存，与 New API 的模型验证状态不同。
+	// 缺少这个前置动作时应拒绝测试，不能由测试请求偷偷完成激活。
+	if _, err := fixture.service.UpdateHostingAccount(t.Context(), "oak:1", "probe-account", HostingUpdateRequest{}, true); err != nil {
+		t.Fatal(err)
+	}
+	executor := &credentialProbeTestExecutor{result: successfulCredentialProbeResult()}
+	fixture.service.executor = executor
+	initControlI18n(t)
+	// 核验端只模拟 New API 已验证的归属，不绕过 gpt-load 的身份中间件。
+	// JWT 的签名和有效期由跨服务认证专项用例覆盖，此处只关注账号测试路由。
+	// 保留两个归属返回值，以实际数据库绑定验证其他用户无法访问。
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		owner := "oak:1"
+		if r.Header.Get("Authorization") == "Bearer "+hostingTestAssertion("oak:2") {
+			owner = "oak:2"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]string{"owner_ref": owner}})
+	}))
+	defer verifier.Close()
+	t.Setenv("OAK_NEW_API_URL", verifier.URL)
+	engine := gin.New()
+	NewServer(&config.Config{AuthKey: "test-admin"}, fixture.service).RegisterRoutes(engine)
+	// 每次 HTTP 请求携带归属断言；未知账号与非本人账号遵守相同隐藏规则。
+	// 请求模型及协议均走 JSON 解码，避免直接调用服务跳过接口契约。
+	// 服务成功信封必须能解码为原有 ProbeResponse，保证 New API 可读取。
+	probe := func(owner, body string) *httptest.ResponseRecorder {
+		return serveCredentialRequest(t, engine, http.MethodPost, "/api/hosting/v1/accounts/probe-account/test?owner_ref="+url.QueryEscape(owner), body, hostingTestAssertion(owner), "")
+	}
+	const body = `{"model":"gpt-test","protocol":"openai-responses"}`
+	response := probe("oak:1", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("probe HTTP %d: %s", response.Code, response.Body)
+	}
+	var envelope struct {
+		Data CredentialProbeResponse `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	// 成功必须来自一次真实执行；目录可见不能直接转换为 passed。
+	// 不产生 restore proof，普通用户不能把诊断结果用于后台凭据恢复。
+	// 使用执行次数区分“一次成功调用”和只检查本地配置的假成功。
+	if envelope.Data.Outcome != CredentialProbeOutcomePassed || envelope.Data.CanRestore || envelope.Data.RestoreProof != nil {
+		t.Fatalf("unexpected result: %#v", envelope.Data)
+	}
+	calls := executor.recordedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("execution count = %d", len(calls))
+	}
+	call := calls[0]
+	// 精确绑定凭据、模型和原生操作，防止误用公共账号或通用 Probe 路由。
+	// 协议和路径同时检查，避免只修改 operation 却保留旧探测请求体。
+	// 失败诊断只打印操作名与内部测试 ID，不能输出完整 CredentialSnapshot。
+	if call.Credential.ID != account.CredentialID || call.ChannelID != string(channel.Codex) || call.Operation != execution.OperationResponsesCreate || call.ClientProtocol != protocol.OpenAIResponses || call.UpstreamModel != "gpt-test" || call.Path != "/v1/responses" || call.Method != http.MethodPost {
+		t.Fatalf("wrong subscription request: operation=%s credential=%d", call.Operation, call.Credential.ID)
+	}
+	if err := call.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	// store=false 是账号测试的边界，不能因普通 Responses 默认存储而遗留会话。
+	// 输入内容由服务固定生成，本断言只关心存在必要字段，不复制生成实现。
+	if json.Unmarshal(call.Body, &payload) != nil || payload["model"] != "gpt-test" || payload["store"] != false || payload["input"] == nil {
+		t.Fatal("invalid stateless probe body")
+	}
+	// 再将入口实际构造的请求送入真实订阅适配器，防止桩接受了错误操作。
+	// 虚构令牌仍有效，因此不需要刷新；身份与版本由真实凭据管理器校验。
+	// 适配器会重新核验渠道声明，能识别只绕过 subscription 门禁的错误修复。
+	// 本次复用的是入口捕获的同一个规格，不为测试单独拼装合法请求。
+	// 数据库、注册表及身份代数均来自真实授权流程，准备阶段也必须通过。
+	manager := subscription.NewCredentialManager(fixture.db, fixture.encryption, fixture.registry, fixture.mutations, fixture.service.subscriptions)
+	adapter := cpa.NewAdapter(manager, fixture.channelRegistry)
+	transportCalls := 0
+	transport := hostingProbeTransport(func(request *http.Request) (*http.Response, error) {
+		transportCalls++
+		raw, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		// 这里只检查虚构身份，失败输出不能包含 Authorization 或完整正文。
+		// 传输层只观察最终厂商 HTTP 形状，不能替适配器补缺失的授权头。
+		// 原厂账号头与 Bearer 必须同时属于选定账号，防止混用授权材料。
+		if request.Header.Get("Authorization") != "Bearer access-probe-id" || request.Header.Get("Chatgpt-Account-Id") != "probe-id" {
+			t.Error("subscription identity was not forwarded")
+		}
+		var upstream map[string]any
+		// 即使 CPA 重写了兼容字段，最终模型与无状态约束仍应保持。
+		// 返回 Codex 实际使用的 SSE 完成事件，验证 unary 聚合路径可读取。
+		// 空 output 只用于网络桩，不把生成内容质量作为连接通过条件。
+		if json.Unmarshal(raw, &upstream) != nil || upstream["model"] != "gpt-test" || upstream["store"] != false {
+			t.Error("invalid provider request")
+		}
+		response := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":1,\"total_tokens\":5}}}\n\n"
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(response)), Request: request}, nil
+	})
+	// 显式代理会覆盖 CPA 的测试 transport，只在副本上取消代理以封锁外部网络。
+	// 生产请求保留账号网络设置；上面的规格断言检查的是入口原始请求。
+	// transport 本身没有默认网络实现，即使 URL 错误也不能访问真实账号。
+	// 此副本只在测试中存在，不改写注册表、数据库或生产代理选择。
+	providerSpec := call.Clone()
+	providerSpec.Proxy = outboundproxy.Effective{}
+	providerCtx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
+	providerResult := adapter.Execute(providerCtx, providerSpec)
+	if providerResult.Error != nil || providerResult.StatusCode != http.StatusOK || transportCalls != 1 {
+		t.Fatalf("provider adapter failed: status=%d calls=%d error=%v", providerResult.StatusCode, transportCalls, providerResult.Error)
+	}
+	// 不允许通过测试接口提交任意 prompt、跨账号或扩展协议。
+	// 拒绝必须发生在执行器之前，避免非法请求也消耗用户额度。
+	// 他人归属即使知道 account_ref 也不能触发模型执行。
+	// 目录外模型应在本地拒绝，而不是依赖原厂拒绝来实现权限范围。
+	// 普通 Completions 支持不意味着本测试入口允许扩展为其他协议。
+	// 空 JSON 不能触发默认模型选择，否则 UI 未选择模型也可能产生费用。
+	for _, tc := range []struct{ owner, body string }{{"oak:2", body}, {"oak:1", `{"model":"missing-model","protocol":"openai-responses"}`}, {"oak:1", `{"model":"gpt-test","protocol":"openai-completions"}`}, {"oak:1", `{}`}} {
+		if got := probe(tc.owner, tc.body); got.Code == http.StatusOK {
+			t.Fatalf("invalid request accepted: %s", got.Body)
+		}
+	}
+	if len(executor.recordedCalls()) != 1 {
+		t.Fatal("invalid request reached upstream")
+	}
+	// 上游拒绝、限流和超时保持稳定分类，不得被 HTTP 200 信封误写为成功。
+	// 401 表示凭据拒绝，只有明确结果才归类为 failed。
+	// 429 与网络超时无法证明账号失效，必须保留 inconclusive。
+	// 每个错误也要实际经过 HTTP 序列化，保证 reason 没有被安全投影丢掉。
+	// 对错误结果不进行第二次执行，避免诊断请求隐式消耗更多额度。
+	for _, tc := range []struct {
+		result  execution.AttemptResult
+		outcome CredentialProbeOutcome
+		reason  CredentialProbeReason
+	}{
+		{failedCredentialProbeResult(401, execution.ErrorKindHTTP, execution.FailureHintInvalidCredential), CredentialProbeOutcomeFailed, CredentialProbeReasonInvalidCredential},
+		{failedCredentialProbeResult(429, execution.ErrorKindHTTP, ""), CredentialProbeOutcomeInconclusive, CredentialProbeReasonRateLimited},
+		{failedCredentialProbeResult(0, execution.ErrorKindTimeout, ""), CredentialProbeOutcomeInconclusive, CredentialProbeReasonTimeout},
+	} {
+		executor.result = tc.result
+		got := probe("oak:1", body)
+		if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &envelope) != nil {
+			t.Fatalf("business result lost: %s", got.Body)
+		}
+		if envelope.Data.Outcome != tc.outcome || envelope.Data.Reason == nil || *envelope.Data.Reason != tc.reason {
+			t.Fatalf("wrong failure result: %#v", envelope.Data)
+		}
+	}
+	// 暂停及删除都禁止新的推理测试，读取额度的权限不等于调用模型的权限。
+	// 暂停用公开服务动作执行，不能直接改绑定表来绕过内部 Key 联动。
+	// 删除后需要返回不存在，不能仅把上游凭据缺失包装为未知测试结果。
+	// 最后再次检查执行次数，防止失败响应之前已经偷偷请求过厂商。
+	paused := true
+	if _, err := fixture.service.UpdateHostingAccount(t.Context(), "oak:1", "probe-account", HostingUpdateRequest{Paused: &paused}, false); err != nil {
+		t.Fatal(err)
+	}
+	before := len(executor.recordedCalls())
+	if got := probe("oak:1", body); got.Code == http.StatusOK {
+		t.Fatal("paused account tested")
+	}
+	if err := fixture.service.DeleteHostingAccount(t.Context(), "oak:1", "probe-account"); err != nil {
+		t.Fatal(err)
+	}
+	if got := probe("oak:1", body); got.Code != http.StatusNotFound {
+		t.Fatalf("deleted account HTTP %d", got.Code)
+	}
+	if len(executor.recordedCalls()) != before {
+		t.Fatal("inactive account reached upstream")
+	}
+}
 
 // 测试只替换厂商换码与模型发现网络，真实执行归属、事务和快照代码。
 // 每个账号都经过浏览器 Stage 状态机，避免直接插绑定自证权限正确。
