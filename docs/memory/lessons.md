@@ -28,3 +28,12 @@
 修复：挂靠入口独立使用 `TestHostingAccount` 构造最小原生 `ResponsesCreate`，指定所属账号和目录内模型，保留凭据准备/刷新、网络设置、安全结果分类及原通用探测禁令。暂停/删除账号和非本人请求在执行前拒绝，不返回恢复 proof，不重试上游失败。
 
 验证：`TestHostingHTTPAccountProbeUsesSubscriptionResponses` 先红后绿，覆盖真实 HTTP 归属、请求契约、401/429/超时、暂停/删除零执行，并将入口实际 AttemptSpec 送入真实 CPA/凭据管理器，只隔离 HTTP transport。control、CPA、subscription 回归、vet 与构建通过。无数据库行为或认证契约变更，未部署或调用真实原厂；真实模型可用性仍需上线后验收。
+
+
+## 2026-11-02 09:47:50 +00:00 — 连接测试不能只以传输成功确认可用
+
+现象：旧挂靠探测只返回结果枚举，界面无法呈现发送内容与模型回复；HTTP 成功也可能对应无效、空文本或未完成响应。新增真实挂靠 HTTP 用例在旧实现上因缺少 `prompt/response_text` 失败。
+
+修复：`internal/control/hosting_probe.go` 保留实际固定输入，按完成态、assistant 消息及 output_text 白名单提取文本；无有效文本为 inconclusive，不激活未验证账号。继续复用执行器已有 SSE 聚合，不在控制层重新解析流。只返回测试文本，不透传原厂错误、工具、推理、元数据或恢复证明。
+
+验证：`internal/control/hosting_test.go` 的真实 HTTP、CPA/SSE 回归通过；New API DTO、前端文本展示同步。适用边界为 Codex 挂靠 Responses 测试，不改变普通管理探测或计费。没有访问真实原厂，不据模拟网络通过承诺真实账号连通。

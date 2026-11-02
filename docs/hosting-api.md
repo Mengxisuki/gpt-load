@@ -91,7 +91,7 @@ Stage DTO 为 `{stage_id,status,authorization_method?,authorization_url?,redirec
 | POST `/accounts/:ref/observation-refresh` | body `{}`，复用观测刷新/节流 |
 | POST `/accounts/:ref/test` | body `{model,protocol:"openai-responses"}`，真实连接测试；不返回 restore_proof |
 
-连接测试通过 `internal/control/hosting_probe.go` 的 `TestHostingAccount`，使用指定私有账号、目录内模型的原生 `ResponsesCreate`，复用订阅凭据准备与刷新。请求使用固定短输入及 `store=false`，会少量消耗原厂额度；不自动重试或换账号。只有激活且未暂停的绑定可测试；不改变凭据健康、不签发管理恢复证明。普通 `TestGroupCredential` 仍拒绝订阅组，Codex 不支持通用 `OperationProbe`。仅明确成功返回 `passed`；拒绝/限流/超时保留安全结果分类。
+连接测试通过 `internal/control/hosting_probe.go` 的 `TestHostingAccount`，使用指定私有账号、目录内模型的原生 `ResponsesCreate`，复用订阅凭据准备与刷新。请求使用固定短输入及 `store=false`，会少量消耗原厂额度；不自动重试或换账号。只有激活且未暂停的绑定可测试；不改变凭据健康、不签发管理恢复证明。普通 `TestGroupCredential` 仍拒绝订阅组，Codex 不支持通用 `OperationProbe`。仅明确完成且包含非空 assistant 文本返回 `passed`；拒绝/限流/超时保留安全结果分类。测试结果新增 `prompt` 与 `response_text`，前者与实际固定输入共用来源，后者仅提取完成响应中的 assistant/output_text；不透传原厂错误正文、工具参数、推理内容或响应元数据。空文本、无效 JSON、未完成结果返回 `inconclusive/probe_incompatible`。两字段只用于本次响应，不写入账号记录或审计。
 
 观测沿用 `state/snapshot/observed_at_ms/last_attempt_at_ms/last_error_code`。`snapshot` 中保留额度窗口、套餐摘要、独立积分与原厂重置机会。新增字段只位于 snapshot：
 

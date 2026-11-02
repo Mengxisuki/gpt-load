@@ -62,7 +62,10 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 	if _, err := fixture.service.UpdateHostingAccount(t.Context(), "oak:1", "probe-account", HostingUpdateRequest{}, true); err != nil {
 		t.Fatal(err)
 	}
-	executor := &credentialProbeTestExecutor{result: successfulCredentialProbeResult()}
+	success := successfulCredentialProbeResult()
+	// 回包混入非文本字段，接口只允许展示模型文本，不能原样透传厂商响应。
+	success.Body = []byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"private_metadata":"must-not-leak"}`)
+	executor := &credentialProbeTestExecutor{result: success}
 	fixture.service.executor = executor
 	initControlI18n(t)
 	// 核验端只模拟 New API 已验证的归属，不绕过 gpt-load 的身份中间件。
@@ -91,7 +94,11 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 		t.Fatalf("probe HTTP %d: %s", response.Code, response.Body)
 	}
 	var envelope struct {
-		Data CredentialProbeResponse `json:"data"`
+		Data struct {
+			CredentialProbeResponse
+			Prompt       string `json:"prompt"`
+			ResponseText string `json:"response_text"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
@@ -101,6 +108,9 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 	// 使用执行次数区分“一次成功调用”和只检查本地配置的假成功。
 	if envelope.Data.Outcome != CredentialProbeOutcomePassed || envelope.Data.CanRestore || envelope.Data.RestoreProof != nil {
 		t.Fatalf("unexpected result: %#v", envelope.Data)
+	}
+	if envelope.Data.Prompt != "Reply only OK." || envelope.Data.ResponseText != "OK" || strings.Contains(response.Body.String(), "must-not-leak") {
+		t.Fatalf("missing or unsafe transcript: %s", response.Body)
 	}
 	calls := executor.recordedCalls()
 	if len(calls) != 1 {
@@ -118,8 +128,8 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 	}
 	var payload map[string]any
 	// store=false 是账号测试的边界，不能因普通 Responses 默认存储而遗留会话。
-	// 输入内容由服务固定生成，本断言只关心存在必要字段，不复制生成实现。
-	if json.Unmarshal(call.Body, &payload) != nil || payload["model"] != "gpt-test" || payload["store"] != false || payload["input"] == nil {
+	// 展示的提示词必须与实际发送正文相同，避免两处各自硬编码后漂移。
+	if json.Unmarshal(call.Body, &payload) != nil || payload["model"] != "gpt-test" || payload["store"] != false || payload["input"] != envelope.Data.Prompt {
 		t.Fatal("invalid stateless probe body")
 	}
 	// 再将入口实际构造的请求送入真实订阅适配器，防止桩接受了错误操作。
@@ -145,11 +155,11 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 		var upstream map[string]any
 		// 即使 CPA 重写了兼容字段，最终模型与无状态约束仍应保持。
 		// 返回 Codex 实际使用的 SSE 完成事件，验证 unary 聚合路径可读取。
-		// 空 output 只用于网络桩，不把生成内容质量作为连接通过条件。
+		// 返回真实 assistant 文本，完整聚合后仍应保留可展示的模型回复。
 		if json.Unmarshal(raw, &upstream) != nil || upstream["model"] != "gpt-test" || upstream["store"] != false {
 			t.Error("invalid provider request")
 		}
-		response := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":4,\"output_tokens\":1,\"total_tokens\":5}}}\n\n"
+		response := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_probe\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-test\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"OK from Codex\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":1,\"total_tokens\":5}}}\n\n"
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(response)), Request: request}, nil
 	})
 	// 显式代理会覆盖 CPA 的测试 transport，只在副本上取消代理以封锁外部网络。
@@ -176,6 +186,32 @@ func TestHostingHTTPAccountProbeUsesSubscriptionResponses(t *testing.T) {
 	}
 	if len(executor.recordedCalls()) != 1 {
 		t.Fatal("invalid request reached upstream")
+	}
+	// 将真实 CPA 聚合结果再次经过挂靠接口，验证 SSE 转 JSON 后仍能展示回复。
+	// HTTP 成功不足以证明模型执行完成，不能把空输出或错误状态当作通过。
+	executor.result = providerResult
+	got := probe("oak:1", body)
+	if json.Unmarshal(got.Body.Bytes(), &envelope) != nil || envelope.Data.ResponseText != "OK from Codex" || envelope.Data.Outcome != CredentialProbeOutcomePassed {
+		t.Fatalf("provider transcript lost: %s", got.Body)
+	}
+	// 只允许 assistant 消息中的 output_text，不把工具参数、推理和错误正文当回复。
+	// 非完成状态即使带部分文本也不能通过；坏 JSON 同样保留未知结果。
+	for _, invalid := range []string{
+		`{"status":"completed","output":[]}`,
+		`{"status":"failed","error":{"message":"private-error"}}`,
+		`{"status":"incomplete","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}]}`,
+		`{"status":"completed","output":[{"type":"function_call","arguments":"private-tool"},{"type":"message","role":"user","content":[{"type":"output_text","text":"private-input"}]}]}`,
+		`not-json`,
+	} {
+		executor.result = success
+		executor.result.Body = []byte(invalid)
+		got := probe("oak:1", body)
+		if json.Unmarshal(got.Body.Bytes(), &envelope) != nil || envelope.Data.Outcome != CredentialProbeOutcomeInconclusive || envelope.Data.ResponseText != "" || envelope.Data.Reason == nil || *envelope.Data.Reason != CredentialProbeReasonIncompatible {
+			t.Fatalf("invalid transcript accepted: %s", got.Body)
+		}
+		if strings.Contains(got.Body.String(), "private-") {
+			t.Fatal("non-text provider data leaked")
+		}
 	}
 	// 上游拒绝、限流和超时保持稳定分类，不得被 HTTP 200 信封误写为成功。
 	// 401 表示凭据拒绝，只有明确结果才归类为 failed。
