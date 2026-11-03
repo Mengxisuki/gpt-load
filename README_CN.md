@@ -163,6 +163,26 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 - **订阅渠道**：Codex、Claude、Antigravity、Grok
 - **自定义**：OpenAI Compatible（任意兼容中转）
 
+## Oak：新任务的跨模型兼容
+
+OpenCode Go / OpenCode Zen 渠道中，最终模型名以 `glm-`、`kimi-`、`deepseek-` 开头的 Responses 请求，自动使用现有的 Chat Completions 转换链路，向客户端返回 Responses 格式。依据是 [OpenCode 模型端点说明](https://opencode.ai/docs/zen/)。GPT 与未识别的模型保持原生路径；直接调用其他供应商的渠道沿用各自已有适配器，不能据此认为所有渠道均已验证。
+
+在新任务开始前配置 New API 的 Key 映射、渠道映射，或者 GPT-Load 的模型别名即可，无需新增开关。规则依据最终目标执行，不要求源名与目标名不同。当前补充只需发布 GPT-Load，无数据库迁移，New API 的映射计费和日志合同保持原样。
+
+支持普通文本、流式、函数工具以及携带完整消息的后续工具回合。复用 Compatible 的参数规则，不把 GPT 的 `reasoning.context`、推理档位及加密输出偏好转发给这些 Chat 目标；目标使用自身的推理默认行为，不能把 GPT 的 `high` 理解为目标的等效档位。GPT-Load 请求详情会记录转换路由和实际的 `openai-completions` 上游协议。
+
+不支持任务中途跨厂商迁移：旧响应 ID、会话引用、加密推理、压缩历史会被明确拒绝。厂商托管工具和自定义语法工具也不能静默删除后继续；这类任务应使用能原生支持其能力的模型。函数命名空间复用 SDK 的展平与名称恢复，不新建另一套工具转换器。
+
+代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器。回归入口：
+
+```bash
+go test ./internal/execution/bifrost -run '^TestOpenCode' -count=1
+go test ./internal/channel/... ./internal/state/... ./internal/provideradapter/... ./internal/execution/... ./internal/gateway/...
+go build -o /tmp/gpt-load-check .
+```
+
+这些测试使用真实网关与本机模拟上游，不消耗供应商额度；通过不代表已完成所有客户端或真实厂商的线上验收。
+
 ## 部署与数据
 
 本 fork 的 Oak 内网实例、分支职责和自动发布流程见 [Oak 部署说明](deploy/oak/README.md)。私有账号接口、隔离规则和验证见 [挂靠执行契约](docs/hosting-api.md)。以下 Docker 与原生用法仍为上游通用说明。

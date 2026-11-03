@@ -32,3 +32,11 @@
 备选：继续共享管理员秘密、另设长期服务密钥，或由 New API 依据当前用户签发请求限定短期断言并在线核验。选择第三项：gpt-load 独立挂靠 HTTP 模块，在本地排除其他凭据后向固定字面回环 New API 验证真实 method/request_uri/body SHA256/Idempotency-Key，业务归属只采用核验响应。不存在共享管理密钥或共享 CRYPTO_SECRET；仅配置非秘密 `OAK_NEW_API_URL`。
 
 代价：每次挂靠控制调用多一次本机核验，New API 核验不可用时失败关闭；两服务须按新合同协同发布。断言30秒有效并可重复只读核验，不是一次性票据；写动作继续由原操作UUID持久幂等。无新增数据库或第三方依赖。实现见 `internal/control/hosting_auth.go` 与 [执行契约](../hosting-api.md)，控制面/容器完整本地回归已通过；未部署此修正，真实厂商授权、推理和耗卡仍不在本次验证范围。
+
+## 2026-11-03 15:26:33 +00:00 — OpenCode 已知 Chat 模型在执行层复用协议转换
+
+背景：用户两次映射分别命中 GLM 和 Kimi，新任务同样被上游以 `reasoning.context` 不支持拒绝。已授权只围绕新任务切换实现。官方端点目录将这些家族和 DeepSeek 列为 Chat；网关提供 Responses 路径不等于其每个模型原生支持全部 Responses 参数。
+
+备选：逐字段删除、在 New API 与 GPT-Load 两层各写兼容规则，或在最终渠道选择后复用现有 Compatible 转换。选择第三项，通过现有模型路由 resolver 为 OpenCode Go/Zen 的 `glm-`、`kimi-`、`deepseek-` 选择转换，其他模型保持原生；普通请求、流式、探测共用模型判断。
+
+代价：GPT 推理选项不能表达为这些目标的等效档位，沿用 Compatible 不转发的合同；只支持可移植的消息/函数工具，旧会话、加密/压缩历史、托管工具及自定义语法显式拒绝。不新增依赖、配置或数据库列。真实网关测试确认日志标注转换模式和实际 Chat 协议；不承诺所有模型家族或客户端。实现和复现见 `README_CN.md`、`internal/execution/bifrost/opencode_presets_test.go`；生产发布与真实厂商验收尚未执行。

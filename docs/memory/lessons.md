@@ -37,3 +37,9 @@
 修复：`internal/control/hosting_probe.go` 保留实际固定输入，按完成态、assistant 消息及 output_text 白名单提取文本；无有效文本为 inconclusive，不激活未验证账号。继续复用执行器已有 SSE 聚合，不在控制层重新解析流。只返回测试文本，不透传原厂错误、工具、推理、元数据或恢复证明。
 
 验证：`internal/control/hosting_test.go` 的真实 HTTP、CPA/SSE 回归通过；New API DTO、前端文本展示同步。适用边界为 Codex 挂靠 Responses 测试，不改变普通管理探测或计费。没有访问真实原厂，不据模拟网络通过承诺真实账号连通。
+
+## 2026-11-03 15:26:33 +00:00 — Responses 探测也需走完整反向转换
+
+现象：为 OpenCode Chat 模型改了请求端点后，普通请求能成功，Responses 探测却被 `normalizeGatewayProtocolProbeResult` 判为协议无效。根因：探测走普通 Chat 请求结构，返回仍为 `chat.completion`，没有转换回声明的 Responses 协议。
+
+修复：探测构造 Responses DTO 并复用 Compatible 的 Chat 执行与反向转换。`TestOpenCodeChatModelResponsesProbe` 在原路径以协议错误失败，修改后通过；同步保留原生 GPT 参数及未知模型原生路由。适用于声明客户端为 Responses、实际供应商仅提供 Chat 的模型探测，不能通过跳过协议校验伪造探测成功。

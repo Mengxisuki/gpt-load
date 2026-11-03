@@ -11,8 +11,15 @@ import (
 )
 
 func (r *Runtime) usesCompatibleChat(spec execution.AttemptSpec) bool {
-	return spec.RouteMode == execution.RouteConverted && r.providerKind(spec) == channel.ProviderOpenAICompatible &&
-		(spec.Operation == execution.OperationChatCompletion || spec.Operation == execution.OperationResponsesCreate)
+	// 转换模式由渠道注册表按最终模型冻结，原生 GPT 不能进入这个分支。
+	// OpenCode 的已知 Chat 模型与 Compatible 共用响应、流式及工具别名转换。
+	// 普通 Compatible 探测维持原行为，新增探测分支只适用于聚合网关。
+	// 探测也要反向构造 Responses，才能通过原有协议校验。
+	provider := r.providerKind(spec)
+	return spec.RouteMode == execution.RouteConverted &&
+		(provider == channel.ProviderOpenAICompatible || provider == channel.ProviderMultiProtocolGateway) &&
+		(spec.Operation == execution.OperationChatCompletion || spec.Operation == execution.OperationResponsesCreate ||
+			provider == channel.ProviderMultiProtocolGateway && spec.Operation == execution.OperationProbe)
 }
 
 func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {

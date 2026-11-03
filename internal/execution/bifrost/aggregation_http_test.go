@@ -35,6 +35,9 @@ var aggregationTestChannels = []channel.ID{channel.CLIProxyAPI, channel.NewAPI, 
 func newAggregationManagerForTest(t *testing.T, id channel.ID, baseURL string) (*RuntimeManager, channel.ResolvedTarget) {
 	t.Helper()
 	switch id {
+	// OpenCode 测试复用真实入口 fixture，凭据及网络仍完全隔离。
+	case channel.OpenCodeGo, channel.OpenCodeZen:
+		return newOpenCodeManagerForTest(t, id, baseURL)
 	case channel.CLIProxyAPI:
 		return newCLIProxyAPIManagerForTest(t, baseURL)
 	case channel.NewAPI:

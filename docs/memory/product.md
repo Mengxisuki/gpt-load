@@ -1,6 +1,6 @@
 # 产品与部署现状
 
-更新时间：2026-11-01 16:11:29 +00:00。
+更新时间：2026-11-03 15:26:33 +00:00。
 
 本仓库是 `Mengxisuki/gpt-load` 对官方 `tbphp/gpt-load` 的 fork，用于 Oak 后续账号挂靠模式的接入基础。当前保留 GPT-Load 的渠道、订阅账号 OAuth/凭据导入、分组、AccessKey、路由及日志能力，本地已实现 Codex 私有归属、受控绑定、执行隔离、重置结果查询与管理分类；用户入口和计费由 New API 承担，尚未部署本次改动。
 
@@ -15,3 +15,9 @@
 分支 `upstream-main` 与官方 `upstream/main` 同源纯跟踪，`oak` 承载开发与专用发布工作流，原 `main` 保留。首次上线应用源码为 `5d1d71c246d22bdf3578bbfd8dd1296e569454a7`，版本为 `oak-5d1d71c246d2-0-1`；后续版本以服务器 `/health` 和 GitHub Actions 实际结果为准。
 
 GitHub 默认分支已设置为 `oak`，`oak-production` 环境只允许 `oak` 分支，专用 `GPT_LOAD_DEPLOY_SSH_KEY` 已通过用户授权的 CLI 录入，私钥保留在仓库外。首次实际推送自动发布[运行41287052506](https://github.com/Mengxisuki/gpt-load/actions/runs/41287052506)成功，服务器切换到 `oak-c8f465846d80-41287052506-1`；版本与提交一致，备份密钥与运行密钥一致、SQLite quick_check通过，应用不能改写发布程序。部署与接手命令见 [deploy/oak/README.md](../../deploy/oak/README.md)。
+
+## 2026-11-03 15:26:33 +00:00 — 新任务跨模型兼容（本地实现）
+
+用户将范围限定为新任务开始前切换模型。OpenCode Go/Zen 对最终名称以 `glm-`、`kimi-`、`deepseek-` 开头的模型自动选择 Responses→Chat→Responses，复用现有 Compatible 转换；GPT 和未知模型保持原生。New API Key/渠道映射均可通过相同执行入口受益，不变更计费或身份。支持文本、流式、函数工具和完整消息的后续回合；旧会话、加密/压缩历史、厂商托管工具、自定义语法工具明确拒绝。没有承诺运行中跨厂商续接或所有供应商参数等价。
+
+本地真实 HTTP 网关及模拟上游已验证路由、工具与用量、日志协议、状态拒绝和 GPT 参数保留；没有真实供应商调用或生产发布。部署只需更新 GPT-Load，无新增配置或数据库变更。模块与验证命令见 [中文说明](../../README_CN.md#oak新任务的跨模型兼容)。
