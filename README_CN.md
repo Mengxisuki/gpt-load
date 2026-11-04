@@ -171,6 +171,12 @@ New API 的 Key 映射、渠道映射以及 GPT-Load 模型别名继续使用原
 
 本次更新只涉及 GPT-Load，无新增配置、依赖或数据库迁移。继续使用现有 OpenCode 渠道根地址，执行器追加 `/v1/responses`；不要将 Codex 配置中的含 `/v1` 地址直接复制为聚合网关根地址。管理探测也使用 Responses，不再以 Chat 成功推断 Responses 可用。
 
+OpenCode Go / Zen 的普通、流式生成及探测自动补齐 `x-opencode-session`：非空已有值原样保留；缺失时依次复用 `Session-Id`、`Session_id`、`Thread-Id`、`X-Claude-Code-Session-Id`；仍缺失则使用网关生成的请求 UUID。同一次请求的重试保持一致，独立请求分别生成，不依赖共享渠道 Key。没有客户端会话线索时不能保证跨请求的会话缓存；本头不替代用户鉴权。网关无法取得唯一请求身份时明确报错，不发固定兜底值。规则不处理其他渠道和模型列表，不修改正文或响应。
+
+客户端无需知道 OpenCode，也不需要在 New API 参数覆盖里添加该头。请勿配置固定的 `{user_session_id}`：当前 New API 不解析这个占位符，GPT-Load 会按“非空已有值保留”处理它。New API 开启请求体透传时还会跳过参数操作中的 `set_header`；不要把这种配置当作有效会话管理。该自动补头代码本地已通过 Gemini 普通和流式真实联调，部署后才对线上用户生效。
+
+定向回归：`go test ./internal/execution/bifrost -run '^TestOpenCodeSession' -count=1`。可选真实联调 `TestOpenCodeSessionLive` 默认跳过；显式设置 `OAK_SESSION_LIVE_URL`、`OAK_SESSION_LIVE_KEY` 和每次新生成的 `OAK_SESSION_LIVE_REQUEST_ID` 后启用，仅发送合成 Gemini 问候请求，会消耗模型额度。凭据通过环境注入，不写入命令参数、源码或文档。
+
 上游拒绝参数或不支持工具时，错误仍交给客户端，不删除工具后重试，不改 `store` 触发上游回退。既有无状态存储及资源操作限制不变；这不承诺运行中跨厂商迁移、跨账号复用私有历史或每个模型都完整支持搜索。除上述已验证的 context 兼容外，其他 GPT 参数仍交给上游校验。真实补测确认 DeepSeek V4 Pro 接受 context，因此不能按“非 GPT”统一删除。实际适配会记录 `opencode.reasoning_context.normalized` 事件及请求 ID，不记录正文或凭据。
 
 本机 HTTP 回归覆盖模型映射、搜索/custom/动态工具保真、两轮历史、普通及流式输出、会话头、上游拒绝、探测与用量。它证明 GPT-Load 没有拦截或改写这些能力，不等于真实供应商完成了搜索。上线验收应检查实际 `web_search_call`、来源、流式终态和续轮；不能只看 HTTP 200。上游已公开的相关行为报告见 [issue #57397](https://github.com/anomalyco/opencode/issues/57397)，报告不作为所有模型的能力承诺。

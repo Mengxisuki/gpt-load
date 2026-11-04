@@ -201,3 +201,10 @@ New API 既有资源测试新增 `TestTokenModelMappingResponsesHotUpdate`：同
 New API 的 GPT 搜索编排联调发现 gpt-6-luna 同时存在 Codex 与 OpenCode Go 组。真实请求日志确认：搜索成功落入 Codex，强制 web_search 失败落入 Go，错误提示该模型没有 hosted search。不能靠名称相同或单次成功认定能力一致；搜索后端应使用支持搜索的独占路由/别名。当前仅在 Codex 组的 gpt-6.1-sol 已完成 Kimi、GLM 主模型的真实搜索及下一轮历史验收。未改生产组配置。
 
 Codex 上游另外拒绝 max_tool_calls，New API 不再默认注入；显式客户端约束仍保留并报告兼容错误。平台只限制自动发起 GPT 请求轮数，不承诺供应商内部搜索次数硬上限。正式实现位于 New API，GPT-Load 不新增搜索编排。配置、费用与边界详见[New API 方案](../../../new-api/docs/plans/api-key-model-mapping.md)。
+
+
+## 2026-11-04 12:34:06 +00:00 — 缺头补齐应复用网关请求身份，避免共享固定值
+
+用户 Gemini Chat 的 Caddy 入口无会话头；原配置重放仍 502，上游明确报缺 x-opencode-session。只在单次测试中补独立随机值便 200/stop，两层日志均成功。New API 的 set_header 参数操作在请求体透传路径被跳过，且线上不识别 {user_session_id}；配置字面量不能当成动态会话。代码证据是 New API 的 relay/compatible_handler.go 透传分支和 relay/channel/api_request.go 占位符解析；核对时线上版本为 7f22628c28df，未改线上配置。
+
+用户选择 GPT-Load 自动补头。本地实现保留已有标识，无标识则使用网关 RequestID：handler 在入口生成 UUID，拒绝客户端伪造，全部重试复用；熵源失败的 untracked 不能当作会话默认值。新实现只改出站头副本，避免污染其他候选。普通、流式、探测与隔离边界测试及真实 Gemini 普通/流式均通过。不要把任意客户端自行传同名会话时的供应商缓存隔离视为本规则的保证；不要把无会话的独立请求宣称为同一对话自动识别。

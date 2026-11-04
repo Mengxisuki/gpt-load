@@ -72,6 +72,13 @@ type streamSDKResult struct {
 // Execute executes one non-streaming attempt.
 func (r *Runtime) Execute(parent context.Context, spec execution.AttemptSpec) (result execution.AttemptResult) {
 	spec = withUserAgent(spec)
+	// OpenCode 必需的路由头在本次尝试的副本上补齐，客户端无需知道供应商。
+	// 缺少唯一请求身份时停止发送，不用共享固定值伪装成功。
+	var sessionErr error
+	spec, sessionErr = withOpenCodeSession(spec)
+	if sessionErr != nil {
+		return notSentUnaryFailure(execution.ErrorKindInternal, sessionErr.Error())
+	}
 	defer func() {
 		normalizeImagesAttemptResult(spec, &result)
 		normalizeEmbeddingsAttemptResult(spec, &result)
@@ -195,6 +202,13 @@ func (r *Runtime) ExecuteStream(
 	sink execution.StreamSink,
 ) (result execution.StreamResult) {
 	spec = withUserAgent(spec)
+	// 流式与普通请求共用同一会话规则，包含 SDK 内部重试。
+	// 在建立上游流之前校验，失败不会产生部分响应或跨请求共享状态。
+	var sessionErr error
+	spec, sessionErr = withOpenCodeSession(spec)
+	if sessionErr != nil {
+		return notSentStreamFailure(execution.ErrorKindInternal, sessionErr.Error())
+	}
 	defer func() {
 		normalizeImagesStreamResult(spec, &result)
 	}()

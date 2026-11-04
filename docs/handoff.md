@@ -1,5 +1,13 @@
 # OpenCode 原生 Responses 兼容验收
 
+## 最新补充：2026-11-04 12:34:06 +00:00 — 自动补会话头已本地完成
+
+用户最终要求仅在 GPT-Load 的 OpenCode 渠道自动补 x-opencode-session。实现位于 `internal/execution/bifrost/opencode_session.go`，由普通及流式 Execute 共用，探测同样生效。已有非空值保留；原生会话别名优先于随机网关 RequestID；无身份时拒绝 untracked。无新配置、数据库或依赖。New API 的占位符草稿不再继续，当前代码已无该草稿。
+
+四包（bifrost、gateway、channel、execution）回归、OpenCode race、vet、go build ./... 通过。本地新执行器经临时 SSH 隧道连接线上 GPT-Load，两次真实 Gemini 合成请求（普通/流式）均完成；未部署服务或修改生产配置，隧道已关闭。可选真实测试 `TestOpenCodeSessionLive` 的三项环境变量见 README_CN.md。当前线上 GPT-Load 为 b341fb746533，本地补头尚未提交/发布。
+
+若用户要求发布，先检查工作区、发布 GPT-Load，再用原先缺头的 Gemini 请求验收。New API 渠道 4 的参数操作仍填有字面量 {user_session_id}，当前因正文透传未执行；不要再将此配置误认为动态标识。若以后关闭透传，非空字面量会被 GPT-Load 保留，届时应移除此冗余配置。未经要求不改线上配置、不推送 oak。下面旧交接是此前时间的任务状态，不能覆盖本段或当前服务版本。
+
 更新时间：2026-11-04 10:28:44 +00:00。用户要求 Codex 请求 gpt-6.1-terra，仅配置 Key 映射 kimi-k3 即可无感完成新任务及同目标工具续轮；本轮要求继续验证。完整无感切换仍未交付。
 
 ## 最新搜索进展
