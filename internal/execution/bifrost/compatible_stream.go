@@ -40,7 +40,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 		usageSeen := false
 		// 格式失败后不再向客户端发工具内容，但继续读取尾部用量再报告失败。
 		// SDK 可能把同一上游块的 finish 与 usage 拆开，立即退出会丢失已发生的消费。
-		var customFailure *schemas.BifrostError
+		var conversionFailure *schemas.BifrostError
 		// 流恢复状态仅属于本次 attempt，不在 Runtime 或 SDK 缓存中共享。
 		// calls 记录工具身份，参数仍由 SDK 原有状态聚合，不维护第二份源码缓存。
 		customStream := openCodeExecStream{bridge: execBridge, calls: make(map[string]bool)}
@@ -55,7 +55,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 		emit := func(response *schemas.BifrostResponsesStreamResponse) bool {
 			// 已有格式错误后只消费上游，不再发布后续内容或终态。
 			// 返回 true 表示继续读取，不表示本次请求已成功。
-			if customFailure != nil {
+			if conversionFailure != nil {
 				return true
 			}
 			providerUtils.RestoreResponsesNamespaceToolCalls(aliases, &schemas.BifrostResponse{ResponsesStreamResponse: response})
@@ -67,7 +67,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 				if restoreErr != nil {
 					// 固定错误消息不包含原始参数，避免诊断日志泄漏执行内容。
 					// 等待 EOF 再上报，兼容供应商在独立尾块中给出 usage 的行为。
-					customFailure = compatibleStreamError(restoreErr.Error())
+					conversionFailure = compatibleStreamError(restoreErr.Error())
 					return true
 				}
 				for _, event := range events {
@@ -90,7 +90,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 					if !sdkStreamEndedNormally(ctx) || ctx.Err() != nil {
 						return
 					}
-					if customFailure == nil {
+					if conversionFailure == nil {
 						// 没有格式错误时沿用原有 finish 校验，不能靠桥接器补造终态。
 						if pending == nil {
 							send(&schemas.BifrostStreamChunk{BifrostError: compatibleStreamError("Chat stream ended without a finish reason")})
@@ -107,13 +107,13 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 						emit(pending)
 					}
 					// 终态快照本身也必须通过恢复校验，不能在 EOF 后吞掉该错误。
-					if customFailure != nil {
+					if conversionFailure != nil {
 						// 错误和用量一起送回既有执行链，计费无需另建特殊通道。
 						// 未观察到用量时保持未知，不能臆造 Token 数或改成未派发。
 						if usageSeen {
-							customFailure.ExtraFields.BilledUsage = usage
+							conversionFailure.ExtraFields.BilledUsage = usage
 						}
-						send(&schemas.BifrostStreamChunk{BifrostError: customFailure})
+						send(&schemas.BifrostStreamChunk{BifrostError: conversionFailure})
 					}
 					return
 				}
@@ -138,6 +138,17 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 					usageSeen = usageSeen || usage.TotalTokens > 0 || usage.PromptTokens > 0 || usage.CompletionTokens > 0
 				}
 				finalExtra = response.ExtraFields
+				// 首个终态之后只收集尾部用量，不能再让 SDK 重复关闭同一工具。
+				// 部分尾块带 role/finish_reason，SDK 会转发它并再次生成工具 done。
+				// 普通函数与 custom 共用此边界，避免只修一种客户端事件。
+				if pending != nil {
+					// 真正的新输出不是尾部元数据，明确失败，不能静默截断成成功。
+					// 保留首个错误并继续读取用量；已发布的工具身份不再重复发送。
+					if conversionFailure == nil && !compatibleStreamTrailer(response) {
+						conversionFailure = compatibleStreamError("Chat stream produced output after finish reason")
+					}
+					continue
+				}
 				if !compatibleToolIndexesKnown(response, state) {
 					send(&schemas.BifrostStreamChunk{BifrostError: compatibleStreamError("Chat tool call has no ID or known index")})
 					return
@@ -159,6 +170,28 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 		}
 	}()
 	return output, nil
+}
+
+// compatibleStreamTrailer 只接受不含生成内容的终态后块。
+// 空 choices、空 delta、重复 role 或 finish_reason 均可携带尾部用量。
+// 文本、推理、拒绝内容及工具增量都意味着模型仍在输出，不能当尾块丢掉。
+// 元数据与多模态字段同样保守拒绝，避免静默遗漏客户端需要的信息。
+// 上游错误在调用本函数之前处理，本判断不会掩盖失败响应。
+func compatibleStreamTrailer(response *schemas.BifrostChatResponse) bool {
+	// 即使转换器只消费首个 choice，也不能把其他 choice 的新输出当作合法尾块忽略。
+	for _, choice := range response.Choices {
+		if choice.ChatStreamResponseChoice == nil || choice.Delta == nil {
+			continue
+		}
+		delta := choice.Delta
+		// 空字符串不包含新输出；不能仅因供应商显式写了空 content 就报错。
+		if delta.Content != nil && *delta.Content != "" || delta.Refusal != nil && *delta.Refusal != "" ||
+			delta.Reasoning != nil && *delta.Reasoning != "" || len(delta.ReasoningDetails) > 0 ||
+			delta.Audio != nil || len(delta.Annotations) > 0 || len(delta.ToolCalls) > 0 || len(delta.ExtraContent) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // SDK 从 map 生成工具结束事件；Gemini 在此时才输出调用，必须保持原输出索引顺序。

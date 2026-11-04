@@ -40,6 +40,8 @@ func TestCompatibleStreamParallelToolsAndTerminal(t *testing.T) {
 	}{
 		{"trailing usage", false, true, false, false},
 		{"finish with tools", true, true, false, false},
+		// 普通并行函数也走同一转换器，不能只保护 custom 工具。
+		{"repeated role finish", true, true, false, false},
 		{"explicit zero usage", true, true, false, true},
 		{"missing usage", false, false, false, false},
 		{"error after finish", true, false, true, false},
@@ -48,6 +50,10 @@ func TestCompatibleStreamParallelToolsAndTerminal(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				stream := compatibleToolStream(tc.finishWithTools, tc.usage, tc.fail)
+				// 结束后只有身份元数据和重复结束标记，应保留尾部用量但不再生成调用。
+				if tc.name == "repeated role finish" {
+					stream = strings.Replace(stream, "data: [DONE]", "data: {\"id\":\"chat_1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]", 1)
+				}
 				if tc.zero {
 					stream = strings.ReplaceAll(stream, `"prompt_tokens":7,"completion_tokens":2,"total_tokens":9`, `"prompt_tokens":0,"completion_tokens":0,"total_tokens":0`)
 				}
@@ -63,6 +69,8 @@ func TestCompatibleStreamParallelToolsAndTerminal(t *testing.T) {
 			var final gjson.Result
 			count := 0
 			reasoningDone := 0
+			// 最终快照没有重复，不代表中间完成事件也只发布一次。
+			toolDone := 0
 			checkSummary := func(item gjson.Result) {
 				t.Helper()
 				if len(item.Get("summary").Array()) != 1 || item.Get("summary.0.type").String() != "summary_text" ||
@@ -74,6 +82,10 @@ func TestCompatibleStreamParallelToolsAndTerminal(t *testing.T) {
 			for _, line := range strings.Split(data.String(), "\n") {
 				if strings.HasPrefix(line, "data: ") {
 					event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+					// 客户端可能据这个事件执行工具，必须按实际帧而非最终数组计数。
+					if event.Get("type").String() == "response.output_item.done" && event.Get("item.type").String() == "function_call" {
+						toolDone++
+					}
 					if sequence := event.Get("sequence_number").Int(); sequence != lastSequence+1 {
 						t.Fatalf("noncontiguous event sequence after %d: %s", lastSequence, event.Raw)
 					} else {
@@ -95,7 +107,8 @@ func TestCompatibleStreamParallelToolsAndTerminal(t *testing.T) {
 				}
 				return
 			}
-			if result.Error != nil || count != 1 || len(final.Get(`output.#(type=="function_call")#`).Array()) != 2 {
+			// 两个并行函数应各自完成一次；重复尾块不能改变此数量。
+			if result.Error != nil || count != 1 || toolDone != 2 || len(final.Get(`output.#(type=="function_call")#`).Array()) != 2 {
 				t.Fatalf("incomplete tools: result=%+v data=%s", result, data.String())
 			}
 			reasoningItems := final.Get(`output.#(type=="reasoning")#`).Array()

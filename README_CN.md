@@ -179,6 +179,8 @@ OpenCode Go / OpenCode Zen 渠道中，最终模型名以 `glm-`、`kimi-`、`de
 
 流式 `exec` 参数在完整接收并校验后发送一条原文 delta 和 done，普通文本与普通函数继续按原方式流出。额外/重复字段、空输入和损坏 JSON 明确报错，不发送无效源码或成功终态；转换错误仍保留实际已观察到的上游用量。其他 grammar、工具或运行中跨厂商历史迁移不在本次支持范围。
 
+Chat 流收到首个结束标记后继续接收尾部用量和错误，但不再将只有身份信息或重复结束标记的尾块转换成工具完成事件，防止客户端重复执行同一调用。终态后若仍有正文、推理或工具参数，明确返回协议错误。已有重复调用历史仍会拒绝；该修复防止生成新的重复事件，不会自动清理或重放已有工具历史。
+
 代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器，`internal/execution/bifrost/opencode_exec.go` 负责上述 custom 工具双向适配。回归入口：
 
 ```bash

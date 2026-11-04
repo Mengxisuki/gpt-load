@@ -593,3 +593,94 @@ func TestOpenCodeExecMappedGateway(t *testing.T) {
 		t.Fatalf("gateway execution evidence missing: %+v", sink.events)
 	}
 }
+
+// 工具结束之后，上游可能在独立用量块中再次携带 finish_reason。
+// 锁定 SDK 会再次生成工具 done；客户端若按 done 执行，就会产生重复历史。
+// 这里用合成 SSE 验证客户端可见的完成次数，不重放线上任务。
+// 终态之后仍须读取用量和错误，不能在第一次 finish 时直接关闭连接。
+// 这证明一种本地可复现的故障机制，不代表已捕获线上原始响应。
+// 空重复结束块可能先被 SDK 过滤，带 role 的尾块才会进入本次修复边界。
+// 同一工具在 done 和 completed 中出现是正常协议，本测试只统计对应事件各自的次数。
+// 续轮使用事件产生的真实历史，重复发布会触发与线上相同的调用 ID 校验。
+// 不对输入历史去重，也不以跳过历史校验制造续轮成功。
+// 已污染的历史仍应明确失败；此修复负责阻止继续制造重复执行事件。
+func TestOpenCodeExecTerminalTrailer(t *testing.T) {
+	for _, tc := range []struct {
+		name, trailer string
+		fail          bool
+	}{
+		// 同一个工具回合只有一次完成；重复结束标记不能再触发执行。
+		{"repeated finish", `{"id":"trailer","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`, false},
+		// role 只是身份元数据，但 SDK 会将此块连同 finish 再转发一次。
+		{"repeated role finish", `{"id":"trailer","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":"tool_calls"}]}`, false},
+		// 有些接口用 stop 结束用量尾块，首个工具终态应保持不变。
+		{"finish with usage", `{"id":"trailer","choices":[{"index":0,"delta":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}`, false},
+		// finish 不是传输结束，晚到错误仍然必须阻止成功终态。
+		{"late error", `{"error":{"type":"server_error","message":"synthetic late failure"}}`, true},
+		// 新正文不是尾部元数据，不能静默丢弃后宣称整个流成功。
+		{"late output", `{"id":"trailer","choices":[{"index":0,"delta":{"content":"late-output-marker"},"finish_reason":"stop"}]}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				// 上游只声明一次 exec；重复由结束块触发，而非两个真实工具调用。
+				// 参数采用正常包装，防止先被格式校验拒绝而绕过本次故障点。
+				io.WriteString(w, `data: {"id":"trailer","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"exec:0","type":"function","function":{"name":"exec","arguments":"{\"input\":\"text(1)\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+				fmt.Fprintf(w, "data: %s\n\n", tc.trailer)
+				// 用量与结束块分开到达，检查修复没有提前退出或丢失计费证据。
+				io.WriteString(w, "data: {\"id\":\"trailer\",\"choices\":[],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":2,\"total_tokens\":10}}\n\ndata: [DONE]\n\n")
+			}))
+			defer server.Close()
+			// 走真实 OpenCode 路由及 Chat 转换，不能只单测恢复器绕过 SDK。
+			manager, target := newOpenCodeManagerForTest(t, channel.OpenCodeGo, server.URL)
+			spec := utilitySpec(channel.OpenCodeGo, protocol.OpenAIResponses, execution.OperationResponsesCreate, http.MethodPost, "/v1/responses", execRequestFixture(t, true, nil, "auto"))
+			spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "kimi-k3", "kimi-k3"
+			var wire strings.Builder
+			result := manager.ExecuteStream(t.Context(), freezeTestAttempt(spec), func(event execution.StreamEvent) error { wire.Write(event.Data); return nil })
+			counts := make(map[string]int)
+			// 从实际下游帧计数，不用最终快照掩盖中间重复执行事件。
+			// 同时取 output_item.done 回传历史，模拟客户端据事件执行工具。
+			var history []any
+			for _, line := range strings.Split(wire.String(), "\n") {
+				if !strings.HasPrefix(line, "data: {") {
+					continue
+				}
+				event := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				counts[event.Get("type").String()]++
+				if event.Get("type").String() == "response.output_item.done" {
+					var item any
+					if err := json.Unmarshal([]byte(event.Get("item").Raw), &item); err != nil {
+						t.Fatal(err)
+					}
+					history = append(history, item)
+				}
+			}
+			// 三种工具完成相关事件都必须各一次，不能只抑制 completed。
+			for _, kind := range []string{"response.custom_tool_call_input.delta", "response.custom_tool_call_input.done", "response.output_item.done"} {
+				if counts[kind] != 1 {
+					t.Errorf("%s count=%d, want 1", kind, counts[kind])
+				}
+			}
+			// 错误尾部不可被成功终态覆盖，合法尾部则保留已观察到的用量。
+			if tc.fail {
+				if result.Error == nil || counts["response.completed"] != 0 || strings.Contains(wire.String(), "late-output-marker") {
+					t.Fatalf("invalid trailer accepted: %+v", result)
+				}
+				return
+			}
+			if result.Error != nil || counts["response.completed"] != 1 || result.Usage == nil {
+				t.Fatalf("terminal/usage mismatch: %+v", result)
+			}
+			// 按下游完成事件重建下一轮，实际发送验证不再触发 duplicate call_id。
+			// 每个完成事件对应一份结果，可直接暴露重复发布造成的续轮失败。
+			for range len(history) {
+				history = append(history, map[string]any{"type": "custom_tool_call_output", "call_id": "exec:0", "output": "ok"})
+			}
+			spec.Body = execRequestFixture(t, true, history, "auto")
+			continued := manager.ExecuteStream(t.Context(), freezeTestAttempt(spec), func(execution.StreamEvent) error { return nil })
+			if continued.Error != nil {
+				t.Fatalf("continuation failed: %+v", continued.Error)
+			}
+		})
+	}
+}
