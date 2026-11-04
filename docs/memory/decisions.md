@@ -59,3 +59,12 @@
 本条替代 2026-11-03 15:26:33 的 OpenCode 家族转换选择，以及 2026-11-04 01:55:03 的 exec 特例选择；通用 Compatible 的命名空间处理与流式尾块修复仍保留。代价是 GPT 参数及全部原生工具交由上游接受或拒绝，不能保证上游每个模型的搜索、custom 或旧会话兼容。已有根地址不自动迁移，不改 store 来操纵路由，不丢工具制造成功。
 
 依据：`internal/channel/modules/opencode_{go,zen}.go`、`opencode_presets_test.go::TestOpenCodeMappedResponsesNativeTools`。新测试在旧代码上对三个目标家族返回本地 422/零上游调用，改动后真实本机 HTTP 双回合通过，GPT 对照保留。上游能力仍需发布后验收；未调用真实模型或改生产。说明见 README_CN 的跨模型章节。
+
+
+## 2026-11-04 09:27:48 +00:00 — 原生 Responses 增加精确目标的 context 兼容
+
+背景：用户要求平台 Key 映射替代修改 Codex config.toml；客户端继续发送 GPT 的 context=all_turns，Kimi K3 与 GLM 5.3 均真实返回该参数不支持。直接配置目标不会带此字段，且真实 custom/动态工具续轮已通过。新实测 DeepSeek V4 Pro 带 context 仍成功。
+
+备选：恢复全量 Chat 转换、按非 GPT 家族删除字段、要求用户手动配置覆盖，或在原生正文准备中按最终模型精确归一化。选择最后一项，只针对 OpenCode Go/Zen 的 kimi-k3、glm-5.3 且值为 all_turns；其他字段、工具、历史、协议及计费保持既有实现。固定事件关联请求 ID，避免无诊断地改变选项。代价是目标集合需在新增证据后维护，不能自动覆盖所有供应商型号；取消的是不支持的推理策略，不是删除输入上下文。
+
+本条补充 2026-11-04 05:30:59 的上游原生转换决策，不恢复本地 Chat 桥接。代码 `opencode_parameters.go`；模拟现场 400 的完整网关用例先红后绿，普通/流式/续轮及其他模型隔离通过。仅本地实现，未发布；搜索权限与执行问题没有被本次修复解决。

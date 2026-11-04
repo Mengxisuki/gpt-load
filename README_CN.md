@@ -167,15 +167,15 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 
 OpenCode Go / OpenCode Zen 渠道的 Responses 请求统一按原生协议转发，包括 Kimi、GLM、DeepSeek 和 GPT。[官方 Codex 接入文档](https://opencode.ai/v2/docs/console/harnesses/codex/)明确由 OpenCode 为非 Responses 模型完成上游协议适配。GPT-Load 不再按模型前缀强制转换为 Chat，也不再将 custom/exec 工具包装成函数。
 
-New API 的 Key 映射、渠道映射以及 GPT-Load 模型别名继续使用原有链路。GPT-Load 仍负责渠道凭据、安全过滤、模型身份、用量观察和日志；工具声明、`additional_tools`、完整工具历史、`reasoning` 与 `include` 按原生请求传递。搜索来源、引用及自定义工具流事件沿用上游响应，日志记录 `native` 和 `openai-responses`。普通 Chat、Anthropic 和其他供应商渠道保持各自原有协议；通用 OpenAI Compatible 的 Chat 转换及尾块去重仍保留。
+New API 的 Key 映射、渠道映射以及 GPT-Load 模型别名继续使用原有链路。GPT-Load 仍负责渠道凭据、安全过滤、模型身份、用量观察和日志；工具声明、`additional_tools`、完整工具历史与 `include` 按原生请求传递。对最终模型为 `kimi-k3`、`glm-5.3` 的 Responses 请求，自动移除上游明确不支持的 `reasoning.context=all_turns`，保留 `effort`、`summary` 及完整输入历史；其他目标和未知 context 值继续透传。搜索来源、引用及自定义工具流事件沿用上游响应，日志记录 `native` 和 `openai-responses`。普通 Chat、Anthropic 和其他供应商渠道保持各自原有协议；通用 OpenAI Compatible 的 Chat 转换及尾块去重仍保留。
 
 本次更新只涉及 GPT-Load，无新增配置、依赖或数据库迁移。继续使用现有 OpenCode 渠道根地址，执行器追加 `/v1/responses`；不要将 Codex 配置中的含 `/v1` 地址直接复制为聚合网关根地址。管理探测也使用 Responses，不再以 Chat 成功推断 Responses 可用。
 
-上游拒绝参数或不支持工具时，错误仍交给客户端，不删除工具后重试，不改 `store` 触发上游回退。既有无状态存储及资源操作限制不变；这不承诺运行中跨厂商迁移、跨账号复用私有历史或每个模型都完整支持搜索。原生转发后，之前由本地转换删掉的 GPT 专属参数也会交给上游，实际支持范围以该上游的结果为准。
+上游拒绝参数或不支持工具时，错误仍交给客户端，不删除工具后重试，不改 `store` 触发上游回退。既有无状态存储及资源操作限制不变；这不承诺运行中跨厂商迁移、跨账号复用私有历史或每个模型都完整支持搜索。除上述已验证的 context 兼容外，其他 GPT 参数仍交给上游校验。真实补测确认 DeepSeek V4 Pro 接受 context，因此不能按“非 GPT”统一删除。实际适配会记录 `opencode.reasoning_context.normalized` 事件及请求 ID，不记录正文或凭据。
 
 本机 HTTP 回归覆盖模型映射、搜索/custom/动态工具保真、两轮历史、普通及流式输出、会话头、上游拒绝、探测与用量。它证明 GPT-Load 没有拦截或改写这些能力，不等于真实供应商完成了搜索。上线验收应检查实际 `web_search_call`、来源、流式终态和续轮；不能只看 HTTP 200。上游已公开的相关行为报告见 [issue #57397](https://github.com/anomalyco/opencode/issues/57397)，报告不作为所有模型的能力承诺。
 
-代码入口：`internal/channel/modules/opencode_{go,zen}.go` 声明原生路由，`internal/execution/bifrost/executor.go` 复用通用透传；回归位于 `opencode_presets_test.go` 和 `internal/channel/opencode_module_test.go`。
+代码入口：`internal/channel/modules/opencode_{go,zen}.go` 声明原生路由，`internal/execution/bifrost/executor.go` 复用通用透传，`opencode_parameters.go` 维护已验证参数差异；回归位于 `opencode_presets_test.go` 和 `internal/channel/opencode_module_test.go`。
 
 ```bash
 go test ./internal/execution/bifrost ./internal/channel ./internal/gateway ./internal/dialect ./internal/provideradapter ./internal/state/... -count=1

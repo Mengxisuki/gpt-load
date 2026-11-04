@@ -1,13 +1,26 @@
-# OpenCode 原生 Responses 上线交接
+# OpenCode 原生 Responses 兼容验收
 
-更新时间：2026-11-04 05:30:59 +00:00。分支 oak，基线 `c2f7279b`；本地未提交、未推送、未部署。用户已批准移除 GPT-Load 对 OpenCode 的强制 Chat 转换，供应商适配由上游承担。
+更新时间：2026-11-04 09:33:42 +00:00。用户要求 Codex 请求 gpt-6.1-terra，仅配置 Key 映射 kimi-k3 即可无感完成新任务及同目标工具续轮；本轮要求继续验证。完整无感切换仍未交付。
 
-已完成：Go/Zen 的 Responses 执行与探测统一原生；删除模型前缀 resolver、OpenCode 转换准备、exec 包装与恢复及过时测试。通用 Compatible 转换及流尾保护保留。无新增依赖、配置或迁移。默认根地址与既有自定义地址未改变。
+## 当前状态
 
-验证：新真实本机 HTTP 测试先红（Kimi/GLM/DeepSeek 本地 422、零上游调用）后绿，覆盖两渠道、四模型、两轮工具历史、普通/流式输出、搜索引用、custom、动态声明、会话头、别名、用量与日志。执行层、渠道、网关、dialect、provideradapter、state 回归及 vet/build 已通过；OpenCode/Compatible 流式定向 race 通过。所有网络上游均为本机合成服务，未验证真实供应商搜索。
+- 线上仍为 `oak-739fc7992019-41784588956-1`。本地已实现精确 Kimi K3 / GLM 5.3 的 context=all_turns 参数兼容，尚未提交、推送或部署。
+- 先前默认 Python UA 的 403/1010 已排除，真实描述性 `Oak-Compatibility-Check/1.0` 可测试；不要继续要求用户手工抓包才能推进。
+- 本轮 19 次真实合成请求：14 次 HTTP 200、5 次明确参数 400。普通函数/custom/动态声明、流式和代表性续轮成功；真实 exec 文法连续两次调用后第三轮完成，call_id 不重复，工具完成与流式终态各一次。
+- `reasoning.context=all_turns` 稳定复现原 400；不带 context 的 high/detailed 可用。强制指定函数与 Kimi thinking 冲突，auto 可用。按类型强制 custom/web_search 也被上游拒绝。
+- web_search 的 auto/required 均 200 但没有搜索事件或引用，模型明确无搜索工具；此为当前路径验收失败，不能泛化为 OpenCode 所有入口/模型都不支持搜索。
+- client tool_search 首次调用成功，完整发现结果续轮未测。使用现有凭据直达回环 GPT-Load，未经过 New API 用户 Key，未重新验证实际计费链；只发送合成任务，未执行生成代码，消耗少量套餐额度。
 
-后续：用户要求发布时，检查实际 diff 并按仓库流程提交推送；oak 推送自动部署并重启，当前未获本轮发布指令。上次线上版本 `oak-c2f7279be06b-41772333177-1` 仍含旧转换。上线后验证指定 Kimi/GLM 的真实 Responses 请求：搜索事件与来源、custom 及动态工具、reasoning.context、流式终态和续轮。不以 HTTP 200 代替搜索验收；不重放用户历史任务或输出凭据。若上游拒绝，不再静默删参数、删工具或改 store 触发回退。
+## 新对照与下一步
 
-相关事实：官方 Codex 专页提供 kimi-k3 Responses 配置；上游 #57397 报告搜索能力随服务路径而异，尚未核实用户具体模型。会话头缺失的两条旧 Chat 请求在 Caddy 入口就没有会话标识，New API 已开启透传，不需要凭空补随机会话。详见 lessons 的 05:12:49、05:20:11 条目。
+用户提供 08:55:55 UTC 的 DeepSeek 和随后 Kimi 直接配置成功样本，已核对 Caddy/New API/GPT-Load。直接配置目标时 Codex 不发 reasoning.context，改用顶层普通函数；原 GPT→Kimi 失败请求带 context、动态 custom exec，且根本没有 web_search 声明。text.verbosity=low 单独保留可成功，custom 原生续轮此前也成功；不要扩大删除范围或造出客户端未声明的工具。详细 ID 和证据见 lessons 最新条目。
 
-关键文件：`internal/channel/modules/opencode_{go,zen}.go`、`internal/execution/bifrost/executor.go`、`compatible.go`、`compatible_stream.go`、`opencode_presets_test.go`、`README_CN.md`。保留其他仓库与本地已有 Caddy 变更，不打包无关内容。
+1. 已完成本地最小参数修复与测试：`opencode_parameters.go` 精确限定 kimi-k3、glm-5.3；DeepSeek V4 Pro 实测接受 context，保持透传。日志事件 `opencode.reasoning_context.normalized` 可追溯请求。完整网关先红后绿、四包回归、OpenCode race、vet/build 通过；New API `TestTokenModelMappingResponsesHotUpdate` 及既有映射管理/权限/缓存定向回归通过。后续需用户要求发布后再验证真实 Key 链路，不能把本地已完成当作线上已修复。
+2. 已对齐用户最后的直接配置搜索测试 `202611040901220321490008268d9d6dD3kfTY7` 与本地 Codex 实际回复：模型明确没有联网工具，回合无搜索事件；不是已成功搜索样本。不能再仅凭 Caddy 请求历史推断当轮输出。搜索独立验收。新旧官方推理入口都没有执行本次 Kimi 搜索；现有 Go 凭据调用官方 `/console/api/websearch` 为 403 Forbidden，原因未定。已询问现有客户端搜索服务，但用户最新优先要求比较直接配置与平台映射，不能继续把普通调用失败归因于搜索。
+3. 补 client tool_search 结果续轮、混合/并行工具以及实际 New API Key→GPT-Load→Kimi 流式任务验收。不能只以 200 或本地模拟通过认定无感切换完成。
+
+## 关键文件与保护
+
+详细能力矩阵及执行日志 ID：`docs/memory/lessons.md` 的 2026-11-04 06:55:27 +00:00 条目。既有方案：`../new-api/docs/plans/api-key-model-mapping.md`。原生入口：`internal/channel/modules/opencode_{go,zen}.go`；模拟回归：`internal/execution/bifrost/opencode_presets_test.go`；现有参数覆盖：`internal/gateway/parameter_override_array_test.go`。
+
+GPT-Load 当前业务修改为 passthrough.go 接入、opencode_parameters.go 及边界测试、opencode_presets_test.go 的现场回归；README/记忆已同步。New API 新增测试位于 controller/resource_relay_test.go，未改业务；New API 的 Caddy、文档和测试变更属于此前任务，必须保留。oak push 自动部署，未经要求不提交或推送。当前测试脚本临时位于本机 /tmp/oak-compat-{verify,auto,stream,codex}.py，只是本轮诊断辅助，不作为长期运行依赖；凭据仅远程读取到内存。

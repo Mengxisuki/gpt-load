@@ -119,6 +119,15 @@ func sanitizeNativeRequestBody(spec execution.AttemptSpec, stream bool) ([]byte,
 			return nil, err
 		}
 		changed := stripNativeControlFields(object)
+		// OpenCode 仅归一化已确认不支持的推理选项，原生工具及历史不变。
+		// 在最终模型确定后处理，普通、流式和探测共用这一个入口。
+		// 此处只改本次解码的副本，后续候选不能继承前一目标的适配结果。
+		// model、计费身份及响应事件仍由现有流程分别处理。
+		normalized, err := normalizeOpenCodeContext(object, spec)
+		if err != nil {
+			return nil, err
+		}
+		changed = changed || normalized
 		if !jsonStringEquals(object["model"], spec.UpstreamModel) {
 			if err := forceJSONModel(object, spec.UpstreamModel); err != nil {
 				return nil, err
