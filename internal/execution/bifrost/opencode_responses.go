@@ -1,6 +1,7 @@
 package bifrost
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/tidwall/gjson"
@@ -58,7 +59,8 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 	}
 	// 加密推理与压缩状态不能交给其他厂商；明确拒绝，不能让 SDK 静默丢弃。
 	// 明文历史和普通工具调用继续交给现有转换器，不改写用户内容。
-	for _, item := range gjson.GetBytes(spec.Body, "input").Array() {
+	tools := gjson.GetBytes(spec.Body, "tools").Array()
+	for index, item := range gjson.GetBytes(spec.Body, "input").Array() {
 		if item.Get("type").String() == "compaction" || item.Get("encrypted_content").Str != "" {
 			failure := notSentConversionFailure(execution.ErrorCodeCriticalSemanticLoss, "start a new task; this target cannot reuse encrypted Responses history")
 			return preparedAttempt{}, &failure
@@ -67,15 +69,36 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 		// 缺省 type 是 Responses 的简写消息形式，类型校验仍由原解码器负责。
 		switch item.Get("type").String() {
 		case "", "message", "reasoning", "function_call", "function_call_output":
+		case "additional_tools":
+			// 动态声明不是厂商执行历史，现有 Compatible 会把定义提升到 tools。
+			// 同样校验其中的工具，避免嵌套自定义或托管工具被 SDK 静默丢弃。
+			// 它不等同于 tool_search_output；搜索调用与结果仍需单独的协议适配。
+			// 检查原始数组形状，再解码 DTO，避免缺失或非数组工具被当成空声明。
+			declared := item.Get("tools")
+			if !declared.IsArray() {
+				failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, "additional_tools.tools must be an array")
+				return preparedAttempt{}, &failure
+			}
+			tools = append(tools, declared.Array()...)
 		default:
-			failure := notSentConversionFailure(execution.ErrorCodeCriticalSemanticLoss, "this Chat target supports message and function-call history only")
+			// 诊断只报告位置与已知协议类型，不回显任意客户端值或历史正文。
+			// 未知类型统一命名，避免 type 字段被用来把敏感内容写入日志。
+			kind := "unknown"
+			switch item.Get("type").String() {
+			case "item_reference", "custom_tool_call", "custom_tool_call_output", "tool_search_call", "tool_search_output",
+				"web_search_call", "web_fetch_call", "file_search_call", "computer_call", "computer_call_output",
+				"code_interpreter_call", "local_shell_call", "local_shell_call_output", "image_generation_call",
+				"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "advisor_call":
+				kind = item.Get("type").String()
+			}
+			failure := notSentConversionFailure(execution.ErrorCodeCriticalSemanticLoss, fmt.Sprintf("Responses input[%d] type %s cannot be converted to Chat; use a compatible native model", index, kind))
 			return preparedAttempt{}, &failure
 		}
 	}
 	// SDK 的通用 Compatible 策略会忽略不支持的工具；新路由不能据此静默失去能力。
 	// 命名空间由现有 SDK 展平并恢复名称，原生托管工具或自定义语法则明确拒绝。
 	// 只检查工具类型，不复制函数参数 schema 的验证或转换规则。
-	tools := gjson.GetBytes(spec.Body, "tools").Array()
+	// 顶层和动态声明共享同一检查队列，避免两处能力规则逐渐不一致。
 	for len(tools) > 0 {
 		tool := tools[0]
 		tools = tools[1:]
@@ -92,6 +115,13 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 	request, err := buildConvertedResponsesRequest(spec, prepared.provider)
 	if err != nil {
 		failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, err.Error())
+		return preparedAttempt{}, &failure
+	}
+	// 在工具选择校验之前提升动态定义，否则 allowed_tools 找不到声明的函数。
+	// 复用原 helper 的请求副本与定义合并语义，不另建转换或丢弃历史。
+	request, toolErr := hoistCompatibleAdditionalTools(request)
+	if toolErr != nil {
+		failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, "invalid tools in additional_tools input item")
 		return preparedAttempt{}, &failure
 	}
 	prepared.responsesRequest = request

@@ -338,6 +338,10 @@ func TestOpenCodeMappedResponsesUsesChat(t *testing.T) {
 // 成功用例保护新任务生成工具调用后的正常第二轮。
 // 不承诺模型切换时能把旧厂商的私有状态迁移到新厂商。
 func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
+	// 动态工具声明与普通回合共用历史，确保成功不是靠丢弃调用结果实现。
+	const toolTurn = `[{"role":"user","content":"read"},{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"file contents"}]}]`
+	// additional_tools 在输入里携带定义，目标 Chat 请求仍须得到完整函数 schema。
+	dynamicTurn := `[{"type":"additional_tools","tools":[{"type":"function","name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]},` + toolTurn[1:]
 	// 失败用例只改变影响可移植性的状态，正文其余部分保持最小有效。
 	// 不把 previous_response_id 当普通字符串删掉后重新开始任务。
 	// 加密推理即使同时存在文字摘要，也不能假装完整迁移。
@@ -346,16 +350,30 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 	for _, tc := range []struct {
 		name, extra, input string
 		reject             bool
+		dynamic            bool
+		historyType        string
 	}{
 		{name: "hosted tool", extra: `,"tools":[{"type":"web_search"}]`, input: `"hello"`, reject: true},
 		{name: "custom tool", extra: `,"tools":[{"type":"custom","name":"patch"}]`, input: `"hello"`, reject: true},
-		{name: "hosted tool history", input: `[{"type":"web_search_call","id":"ws_1"}]`, reject: true},
+		{name: "hosted tool history", input: `[{"type":"web_search_call","id":"ws_1"}]`, reject: true, historyType: "web_search_call"},
+		// 未实现的历史保留拒绝，但日志须能区分类型，不再只返回同一笼统原因。
+		{name: "custom tool history", input: `[{"type":"custom_tool_call","name":"patch","input":"private-history-marker"}]`, reject: true, historyType: "custom_tool_call"},
+		{name: "tool search history", input: `[{"type":"tool_search_output","tools":[]}]`, reject: true, historyType: "tool_search_output"},
+		// 未知 type 也属于不可信输入，诊断不能把它原样写到日志。
+		{name: "unknown history", input: `[{"type":"private-history-marker"}]`, reject: true, historyType: "unknown"},
 		{name: "previous response", extra: `,"previous_response_id":"resp_old"`, input: `"continue"`, reject: true},
 		{name: "conversation", extra: `,"conversation":"conv_old"`, input: `"continue"`, reject: true},
 		{name: "encrypted reasoning", input: `[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]`, reject: true},
 		{name: "compaction", input: `[{"type":"compaction","encrypted_content":"opaque"},{"role":"user","content":"continue"}]`, reject: true},
 		// 无状态工具回合依赖完整 call_id 与 output，不能误判成跨厂商旧会话。
-		{name: "complete tool turn", input: `[{"role":"user","content":"read"},{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"file contents"}]}]`},
+		{name: "complete tool turn", input: toolTurn},
+		// 已有 Compatible 提升逻辑不能被 OpenCode 的历史白名单挡住。
+		{name: "dynamic function tools", input: dynamicTurn, dynamic: true},
+		// 白名单选择也必须在工具提升之后执行，否则声明存在但解析不到目标。
+		{name: "dynamic allowed tools", input: dynamicTurn, extra: `,"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"read_file"}]}`, dynamic: true},
+		// 动态声明不是绕过原有工具能力校验的入口。
+		{name: "dynamic custom tool", input: `[{"type":"additional_tools","tools":[{"type":"custom","name":"patch"}]}]`, reject: true},
+		{name: "dynamic hosted namespace", input: `[{"type":"additional_tools","tools":[{"type":"namespace","name":"files","tools":[{"type":"web_search"}]}]}]`, reject: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// 零调用是本地拒绝的可观察证据，而非仅检查错误文案。
@@ -369,6 +387,10 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 				// 保留调用身份和结果文本，目标仍是本轮固定的 Kimi。
 				if gjson.GetBytes(wire, "messages.1.tool_calls.0.id").String() != "call_1" || gjson.GetBytes(wire, "messages.2.tool_call_id").String() != "call_1" || gjson.GetBytes(wire, "messages.2.content").String() != "file contents" {
 					t.Errorf("tool continuation changed: %s", wire)
+				}
+				// 同时断言定义与历史均到达上游，不能只检查 HTTP 成功。
+				if tc.dynamic && (gjson.GetBytes(wire, "tools.0.function.name").String() != "read_file" || gjson.GetBytes(wire, "tools.0.function.parameters.properties.path.type").String() != "string") {
+					t.Errorf("dynamic tool definition lost: %s", wire)
 				}
 				w.Header().Set("Content-Type", "application/json")
 				io.WriteString(w, openAIChatFinalResponse)
@@ -388,6 +410,10 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 				// 禁止先向供应商发送、再把状态丢失解释成可重试错误。
 				if result.Error == nil || result.Error.Code != execution.ErrorCodeCriticalSemanticLoss || result.DispatchState != execution.DispatchNotSent || calls != 0 {
 					t.Fatalf("state not rejected before sending: %+v, calls=%d", result.Error, calls)
+				}
+				// 只允许固定类型和数组位置进入诊断，完整正文仍不记录。
+				if tc.historyType != "" && (!strings.Contains(result.Error.Summary, "input[0] type "+tc.historyType) || strings.Contains(result.Error.Summary, "private-history-marker")) {
+					t.Errorf("unsafe or unhelpful history error: %s", result.Error.Summary)
 				}
 			} else if result.Error != nil || calls != 1 || result.StatusCode != 200 {
 				t.Fatalf("tool continuation failed: %+v, calls=%d", result.Error, calls)

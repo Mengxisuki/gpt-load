@@ -171,6 +171,8 @@ OpenCode Go / OpenCode Zen 渠道中，最终模型名以 `glm-`、`kimi-`、`de
 
 支持普通文本、流式、函数工具以及携带完整消息的后续工具回合。复用 Compatible 的参数规则，不把 GPT 的 `reasoning.context`、推理档位及加密输出偏好转发给这些 Chat 目标；目标使用自身的推理默认行为，不能把 GPT 的 `high` 理解为目标的等效档位。GPT-Load 请求详情会记录转换路由和实际的 `openai-completions` 上游协议。
 
+`additional_tools` 输入项中的函数声明复用已有提升逻辑进入 Chat 的 `tools`，并在工具白名单校验前完成提升；动态声明中的托管、自定义工具仍拒绝。它与 `tool_search_call` / `tool_search_output` 不是同一种历史，不能仅放宽类型检查后丢弃搜索语义。不支持的历史会在服务端错误详情中记录数组位置和已知协议类型，未知类型不回显原值；客户端仍沿用统一转换失败响应。
+
 不支持任务中途跨厂商迁移：旧响应 ID、会话引用、加密推理、压缩历史会被明确拒绝。厂商托管工具和自定义语法工具也不能静默删除后继续；这类任务应使用能原生支持其能力的模型。函数命名空间复用 SDK 的展平与名称恢复，不新建另一套工具转换器。
 
 代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器。回归入口：

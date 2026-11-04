@@ -43,3 +43,11 @@
 现象：为 OpenCode Chat 模型改了请求端点后，普通请求能成功，Responses 探测却被 `normalizeGatewayProtocolProbeResult` 判为协议无效。根因：探测走普通 Chat 请求结构，返回仍为 `chat.completion`，没有转换回声明的 Responses 协议。
 
 修复：探测构造 Responses DTO 并复用 Compatible 的 Chat 执行与反向转换。`TestOpenCodeChatModelResponsesProbe` 在原路径以协议错误失败，修改后通过；同步保留原生 GPT 参数及未知模型原生路由。适用于声明客户端为 Responses、实际供应商仅提供 Chat 的模型探测，不能通过跳过协议校验伪造探测成功。
+
+## 2026-11-04 00:57:13 +00:00 — 历史白名单不能阻断已有动态工具提升
+
+已验证线上事实：北京时间 2026-11-04 08:49:18 起的 23 条 Kimi 请求已完成模型映射，但 GPT-Load 的 OpenCode 历史白名单返回 422，错误为 `this Chat target supports message and function-call history only`。执行记录均为 `not_sent`，New API 对外返回 502；订阅不足已回退钱包，并非终止原因。线上版本为 New API `960e688ca255`、GPT-Load `f2cf60f3498f`。这批请求没有 `request_log_bodies`，无法从日志判定具体 input 类型，不能断言全部由下述遗漏引起。
+
+独立复现的代码遗漏：`prepareOpenCodeResponses` 将 `additional_tools` 当作不支持的执行历史，但 `compatible.go` 已实现动态声明提升。仅放行还不够，`allowed_tools` 校验发生在旧提升位置之前，会找不到动态函数。修复在原始工具类型校验后、工具选择校验前复用 `hoistCompatibleAdditionalTools`，顶层与动态声明统一校验，保留定义、调用和结果。不放行自定义/托管历史或加密状态；错误补充位置和已知类型，未知值不写日志。
+
+验证：`TestOpenCodeResponsesStateAndToolContinuation` 新增动态函数及白名单用例先失败后通过，核对真实本机 HTTP 请求中的工具 schema、call_id、结果文本；拒绝嵌套不支持的工具并验证诊断脱敏。`go test ./internal/execution/bifrost ./internal/gateway ./internal/channel ./internal/dialect -count=1`、`go vet ./internal/execution/bifrost`、主程序构建通过。未提交、推送、部署或向真实厂商重放请求；原线上请求的具体失败类型仍待补充证据。官方 [Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search) 将搜索调用与搜索结果定义为独立协议项，不能与动态函数声明混同。
