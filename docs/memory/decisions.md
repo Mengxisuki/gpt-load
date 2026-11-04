@@ -48,3 +48,14 @@
 备选：通用 Lark 解析器与任意 custom 桥接、删除工具，或只支持已证明等价的声明。选择最后一种：精确匹配默认 namespace 的 exec 与已知 grammar，以单字段 `input` JSON 包装发送，普通和流式输出严格解包，并转换下一轮调用、结果及工具选择。复用既有 SDK 的命名空间、历史和消费证据链，不引入依赖。补充并限定 2026-11-03 15:26:33 条目中自定义语法的拒绝边界。
 
 代价：流式 exec 源码须在完整参数校验后一次发出，无法逐字符显示生成过程；文法变更或其他 custom 工具继续明确拒绝，需以新样例重新确认合同。无效输出返回错误并保留用量，不生成假的完成态。实现及回归见 `internal/execution/bifrost/opencode_exec.go`、`opencode_exec_test.go`；本地验证通过，未发布，未验证真实模型的工具生成质量。
+
+
+## 2026-11-04 05:30:59 +00:00 — OpenCode 协议转换交回上游
+
+背景：本地按模型家族强制 Chat 已阻断 web_search，后续需要持续维护 custom/grammar 及工具历史特例；官方 Codex 专页明确支持 Kimi 直接使用 Go Responses，由上游适配。用户在本轮明确批准不在 GPT-Load 层转换。
+
+备选：继续增加厂商工具转换与搜索执行服务，或恢复 OpenCode 原生 Responses。采用后者，删除模型前缀 resolver、OpenCode 转换准备及专用 exec 包装/恢复，复用原生凭据过滤、模型别名、用量与错误处理。无新的搜索服务、依赖或配置，其他渠道继续其现有转换。
+
+本条替代 2026-11-03 15:26:33 的 OpenCode 家族转换选择，以及 2026-11-04 01:55:03 的 exec 特例选择；通用 Compatible 的命名空间处理与流式尾块修复仍保留。代价是 GPT 参数及全部原生工具交由上游接受或拒绝，不能保证上游每个模型的搜索、custom 或旧会话兼容。已有根地址不自动迁移，不改 store 来操纵路由，不丢工具制造成功。
+
+依据：`internal/channel/modules/opencode_{go,zen}.go`、`opencode_presets_test.go::TestOpenCodeMappedResponsesNativeTools`。新测试在旧代码上对三个目标家族返回本地 422/零上游调用，改动后真实本机 HTTP 双回合通过，GPT 对照保留。上游能力仍需发布后验收；未调用真实模型或改生产。说明见 README_CN 的跨模型章节。

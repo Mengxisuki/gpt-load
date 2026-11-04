@@ -13,7 +13,7 @@ import (
 
 // #665：从完整 Chat chunk 转换，保留原 Responses 执行器的生命周期和客户端编码。
 // SDK 修复后应连同专用入口删除；终态/用量/晚到错误的回归继续保留。
-func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest, execBridge *openCodeExecBridge) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	chat, aliases, err := prepareCompatibleChatRequest(ctx, request)
 	if err != nil {
 		return nil, err
@@ -41,9 +41,6 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 		// 格式失败后不再向客户端发工具内容，但继续读取尾部用量再报告失败。
 		// SDK 可能把同一上游块的 finish 与 usage 拆开，立即退出会丢失已发生的消费。
 		var conversionFailure *schemas.BifrostError
-		// 流恢复状态仅属于本次 attempt，不在 Runtime 或 SDK 缓存中共享。
-		// calls 记录工具身份，参数仍由 SDK 原有状态聚合，不维护第二份源码缓存。
-		customStream := openCodeExecStream{bridge: execBridge, calls: make(map[string]bool)}
 		send := func(chunk *schemas.BifrostStreamChunk) bool {
 			select {
 			case output <- chunk:
@@ -59,26 +56,6 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 				return true
 			}
 			providerUtils.RestoreResponsesNamespaceToolCalls(aliases, &schemas.BifrostResponse{ResponsesStreamResponse: response})
-			if execBridge != nil {
-				// 参数完整后才发布自由文本；格式失败终止流，不输出假的 completed。
-				// 保留已观察到的用量，格式转换失败不能抹掉上游实际执行证据。
-				// 别名已先恢复，此处可正确区分其他 namespace 下的同名普通函数。
-				events, restoreErr := customStream.restore(response)
-				if restoreErr != nil {
-					// 固定错误消息不包含原始参数，避免诊断日志泄漏执行内容。
-					// 等待 EOF 再上报，兼容供应商在独立尾块中给出 usage 的行为。
-					conversionFailure = compatibleStreamError(restoreErr.Error())
-					return true
-				}
-				for _, event := range events {
-					// 一次参数结束可能产生 delta 和 done，两帧都遵守同一个取消信号。
-					// 发布中途客户端断开仍立即退出，不为了读取用量继续后台执行。
-					if !send(&schemas.BifrostStreamChunk{BifrostResponsesStreamResponse: event}) {
-						return false
-					}
-				}
-				return true
-			}
 			return send(&schemas.BifrostStreamChunk{BifrostResponsesStreamResponse: response})
 		}
 		for {
@@ -91,7 +68,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 						return
 					}
 					if conversionFailure == nil {
-						// 没有格式错误时沿用原有 finish 校验，不能靠桥接器补造终态。
+						// 没有格式错误时验证 finish，不能把缺失终态的上游流报告为成功。
 						if pending == nil {
 							send(&schemas.BifrostStreamChunk{BifrostError: compatibleStreamError("Chat stream ended without a finish reason")})
 							return
@@ -103,10 +80,9 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 						}
 						pending.ExtraFields = finalExtra
 						pending.ExtraFields.RequestType = schemas.ResponsesStreamRequest
-						// 完整快照也经过 custom 恢复，忽略增量的客户端仍收到一致类型。
+						// 发布完整快照，忽略增量的客户端也能读取全部函数调用。
 						emit(pending)
 					}
-					// 终态快照本身也必须通过恢复校验，不能在 EOF 后吞掉该错误。
 					if conversionFailure != nil {
 						// 错误和用量一起送回既有执行链，计费无需另建特殊通道。
 						// 未观察到用量时保持未知，不能臆造 Token 数或改成未派发。
@@ -140,7 +116,7 @@ func (r *Runtime) compatibleResponsesStream(ctx *schemas.BifrostContext, request
 				finalExtra = response.ExtraFields
 				// 首个终态之后只收集尾部用量，不能再让 SDK 重复关闭同一工具。
 				// 部分尾块带 role/finish_reason，SDK 会转发它并再次生成工具 done。
-				// 普通函数与 custom 共用此边界，避免只修一种客户端事件。
+				// 普通函数及文本共用此边界，避免重复发布终态。
 				if pending != nil {
 					// 真正的新输出不是尾部元数据，明确失败，不能静默截断成成功。
 					// 保留首个错误并继续读取用量；已发布的工具身份不再重复发送。

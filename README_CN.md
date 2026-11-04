@@ -165,32 +165,26 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 
 ## Oak：新任务的跨模型兼容
 
-OpenCode Go / OpenCode Zen 渠道中，最终模型名以 `glm-`、`kimi-`、`deepseek-` 开头的 Responses 请求，自动使用现有的 Chat Completions 转换链路，向客户端返回 Responses 格式。依据是 [OpenCode 模型端点说明](https://opencode.ai/docs/zen/)。GPT 与未识别的模型保持原生路径；直接调用其他供应商的渠道沿用各自已有适配器，不能据此认为所有渠道均已验证。
+OpenCode Go / OpenCode Zen 渠道的 Responses 请求统一按原生协议转发，包括 Kimi、GLM、DeepSeek 和 GPT。[官方 Codex 接入文档](https://opencode.ai/v2/docs/console/harnesses/codex/)明确由 OpenCode 为非 Responses 模型完成上游协议适配。GPT-Load 不再按模型前缀强制转换为 Chat，也不再将 custom/exec 工具包装成函数。
 
-在新任务开始前配置 New API 的 Key 映射、渠道映射，或者 GPT-Load 的模型别名即可，无需新增开关。规则依据最终目标执行，不要求源名与目标名不同。当前补充只需发布 GPT-Load，无数据库迁移，New API 的映射计费和日志合同保持原样。
+New API 的 Key 映射、渠道映射以及 GPT-Load 模型别名继续使用原有链路。GPT-Load 仍负责渠道凭据、安全过滤、模型身份、用量观察和日志；工具声明、`additional_tools`、完整工具历史、`reasoning` 与 `include` 按原生请求传递。搜索来源、引用及自定义工具流事件沿用上游响应，日志记录 `native` 和 `openai-responses`。普通 Chat、Anthropic 和其他供应商渠道保持各自原有协议；通用 OpenAI Compatible 的 Chat 转换及尾块去重仍保留。
 
-支持普通文本、流式、函数工具以及携带完整消息的后续工具回合。复用 Compatible 的参数规则，不把 GPT 的 `reasoning.context`、推理档位及加密输出偏好转发给这些 Chat 目标；目标使用自身的推理默认行为，不能把 GPT 的 `high` 理解为目标的等效档位。GPT-Load 请求详情会记录转换路由和实际的 `openai-completions` 上游协议。
+本次更新只涉及 GPT-Load，无新增配置、依赖或数据库迁移。继续使用现有 OpenCode 渠道根地址，执行器追加 `/v1/responses`；不要将 Codex 配置中的含 `/v1` 地址直接复制为聚合网关根地址。管理探测也使用 Responses，不再以 Chat 成功推断 Responses 可用。
 
-`additional_tools` 输入项中的声明复用已有提升逻辑进入 Chat 的 `tools`，并在工具白名单校验前完成提升；动态声明与顶层声明采用相同的支持范围。它与 `tool_search_call` / `tool_search_output` 不是同一种历史，不能仅放宽类型检查后丢弃搜索语义。不支持的历史会在服务端错误详情中记录数组位置和已知协议类型，未知类型不回显原值；客户端仍沿用统一转换失败响应。
+上游拒绝参数或不支持工具时，错误仍交给客户端，不删除工具后重试，不改 `store` 触发上游回退。既有无状态存储及资源操作限制不变；这不承诺运行中跨厂商迁移、跨账号复用私有历史或每个模型都完整支持搜索。原生转发后，之前由本地转换删掉的 GPT 专属参数也会交给上游，实际支持范围以该上游的结果为准。
 
-不支持任务中途跨厂商迁移：旧响应 ID、会话引用、加密推理、压缩历史会被明确拒绝。厂商托管工具和未适配的自定义语法工具明确拒绝，需使用能原生支持其能力的模型。Chat 请求中的函数命名空间始终复用 SDK 展平与名称恢复，不能因模型支持 Responses 命名空间而跳过 Chat 所需的转换。
+本机 HTTP 回归覆盖模型映射、搜索/custom/动态工具保真、两轮历史、普通及流式输出、会话头、上游拒绝、探测与用量。它证明 GPT-Load 没有拦截或改写这些能力，不等于真实供应商完成了搜索。上线验收应检查实际 `web_search_call`、来源、流式终态和续轮；不能只看 HTTP 200。上游已公开的相关行为报告见 [issue #57397](https://github.com/anomalyco/opencode/issues/57397)，报告不作为所有模型的能力承诺。
 
-已适配默认命名空间（省略或 `functions`）的 `exec` 自定义工具：只接受 `grammar/lark` 且定义与 `internal/execution/bifrost/opencode_exec.go` 中已验证文法一致（仅忽略定义两端空白）。其 `plain_source` 分支允许任意非空文本，因此可等价包装为仅含非空 `input` 字符串的 Chat 函数参数，无需通用 Lark 解析器。普通返回、流式返回及下一轮调用/结果均恢复 custom 合同，保留原文、调用 ID 和命名空间；强制选择与工具白名单同步转换。
-
-流式 `exec` 参数在完整接收并校验后发送一条原文 delta 和 done，普通文本与普通函数继续按原方式流出。额外/重复字段、空输入和损坏 JSON 明确报错，不发送无效源码或成功终态；转换错误仍保留实际已观察到的上游用量。其他 grammar、工具或运行中跨厂商历史迁移不在本次支持范围。
-
-Chat 流收到首个结束标记后继续接收尾部用量和错误，但不再将只有身份信息或重复结束标记的尾块转换成工具完成事件，防止客户端重复执行同一调用。终态后若仍有正文、推理或工具参数，明确返回协议错误。已有重复调用历史仍会拒绝；该修复防止生成新的重复事件，不会自动清理或重放已有工具历史。
-
-代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器，`internal/execution/bifrost/opencode_exec.go` 负责上述 custom 工具双向适配。回归入口：
+代码入口：`internal/channel/modules/opencode_{go,zen}.go` 声明原生路由，`internal/execution/bifrost/executor.go` 复用通用透传；回归位于 `opencode_presets_test.go` 和 `internal/channel/opencode_module_test.go`。
 
 ```bash
-go test ./internal/execution/bifrost -run '^TestOpenCode' -count=1
-go test -race ./internal/execution/bifrost -run '^TestOpenCodeExec' -count=1
-go test ./internal/channel/... ./internal/state/... ./internal/provideradapter/... ./internal/execution/... ./internal/gateway/...
+go test ./internal/execution/bifrost ./internal/channel ./internal/gateway ./internal/dialect ./internal/provideradapter ./internal/state/... -count=1
+go test -race ./internal/execution/bifrost -run 'TestOpenCode|TestCompatibleStreamParallelToolsAndTerminal' -count=1
+go vet ./internal/execution/bifrost ./internal/channel/...
 go build -o /tmp/gpt-load-check .
 ```
 
-这些测试使用真实网关与本机模拟上游，不消耗供应商额度；通过不代表已完成所有客户端或真实厂商的线上验收。
+测试使用本机模拟上游，不消耗供应商额度。本地实现未自动提交、推送或部署。
 
 ## 部署与数据
 

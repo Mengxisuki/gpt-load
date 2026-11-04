@@ -209,121 +209,157 @@ func newOpenCodeManagerForTest(t *testing.T, id channel.ID, baseURL string) (*Ru
 	return manager, target
 }
 
-// 用真实执行器和 HTTP 边界复现新任务的参数拒绝，不 mock 协议转换函数。
-// 源名仍是 GPT；目标由冻结路由决定，覆盖 New API 两种映射进入后的共同形状。
-// 三类目标共用 Chat 协议，返回仍须符合客户端的 Responses 合同。
-// 断言覆盖请求及响应两端，避免只验证请求不报错。
-// 流和非流分别走不同 SDK 路径，因此同一模型都需要执行两次。
-// 错误响应刻意采用现场报错，但业务正文完全是合成数据。
-func TestOpenCodeMappedResponsesUsesChat(t *testing.T) {
-	// 两个入口的 base_url 前缀不同，但应具有相同的模型族策略。
-	// 每例独立创建运行时，避免前一个模型留下连接或路由缓存影响结果。
-	// GLM/Kimi 来自现场报错，DeepSeek 覆盖用户提出的另一类目标。
-	// 不向真实厂商发请求，也不依赖生产组或已登录账号。
+// 验证完整网关而非转换 helper：客户端别名最终必须命中 Responses。
+// 合成上游只检查协议及字段保真，不声称真实厂商已实现这些工具。
+// 搜索、动态声明、未知 grammar 和完整历史都由上游判断能力。
+// 普通响应与流式响应共享样本，避免只验证 HTTP 成功状态。
+// 两个渠道及原先命中的模型家族均覆盖，GPT 作为隔离对照。
+// 测试不依赖用户账号或外网，所有任务文本与引用都是合成数据。
+// 不校验模型回答质量；这里的验收对象是 Oak 的传输合同。
+// 请求只允许模型别名替换，其他语义变化都应由这个用例暴露。
+// 原生工具无需在本地登记新类型，未知声明也必须送达供应商。
+func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
+	// 搜索调用及来源必须保留，不能将其压成普通回答文本。
+	// custom 的输入按自由文本透传，不能包装为 function 的 JSON 参数。
+	// 同一输出将用作下一轮历史，检查请求和响应双向保真。
+	const output = `[{"type":"web_search_call","id":"ws_1","status":"completed","action":{"type":"search","query":"example","sources":[{"type":"url","url":"https://example.com"}]}},{"type":"custom_tool_call","id":"ct_1","call_id":"call_1","name":"exec","namespace":"functions","input":"text(1)"},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"example","annotations":[{"type":"url_citation","start_index":0,"end_index":7,"url":"https://example.com","title":"Example"}]}]}]`
+	// 中间搜索状态与自由文本增量属于原生事件，不能只保留最终快照。
+	// 逐字比较该段合成 SSE，可检测事件名、输入文本或输出索引被改写。
+	const toolEvents = "event: response.web_search_call.searching\ndata: {\"type\":\"response.web_search_call.searching\",\"item_id\":\"ws_1\",\"output_index\":0}\n\nevent: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ct_1\",\"output_index\":1,\"delta\":\"text(1)\"}\n\n"
 	for _, id := range []channel.ID{channel.OpenCodeGo, channel.OpenCodeZen} {
-		for _, model := range []string{"glm-5.3", "kimi-k3", "deepseek-v4.1-flash"} {
+		for _, model := range []string{"kimi-k3", "glm-5.3", "deepseek-v4.1-flash", "gpt-6-luna"} {
 			for _, stream := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/stream=%t", id, model, stream), func(t *testing.T) {
-					// 只捕获模拟服务器实际收到的正文，不能从请求草稿推导通过结果。
+					// 记录真正发出的请求，不能拿本地请求草稿替代网络边界验证。
+					// 请求串行执行，捕获值在每轮完成后读取，不共享跨用例状态。
 					var received []byte
-					// 上游仅接受 Chat；旧实现在 /responses 上稳定返回现场同类错误。
-					// 同时保留真实 HTTP 序列化，捕获模型、指令与工具 schema 的丢失。
+					var session string
+					calls := 0
+					// 返回的模型身份也需要按既有别名机制恢复。
+					// usage 使用非零整数，能识别被本地重建成零用量的回归。
+					responseBody := fmt.Sprintf(`{"id":"resp_1","object":"response","status":"completed","model":%q,"output":%s,"usage":{"input_tokens":12,"output_tokens":3,"total_tokens":15}}`, model, output)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						w.Header().Set("Content-Type", "application/json")
-						if r.URL.Path != "/custom-root/v1/chat/completions" {
-							w.WriteHeader(400)
-							io.WriteString(w, `{"error":{"message":"reasoning.context: this reasoning option requires a native Responses target"}}`)
+						calls++
+						// 若仍走 Chat，则直接失败；禁止以假 Chat 回包掩盖选路错误。
+						if r.URL.Path != "/team-a/v1/responses" {
+							t.Errorf("unexpected protocol path: %s", r.URL.Path)
+							w.WriteHeader(http.StatusBadRequest)
 							return
 						}
-						// 模拟服务使用内存正文；后续字段断言同时检查成功读取。
-						// 认证仍由原执行器写入，转换不能沿用客户端凭据。
-						received, _ = io.ReadAll(r.Body)
-						if r.Header.Get("Authorization") != "Bearer "+testAPIKey {
-							t.Error("upstream credential missing")
+						// 读取失败必须使测试失败，不能用空正文继续比较。
+						var readErr error
+						received, readErr = io.ReadAll(r.Body)
+						if readErr != nil {
+							t.Error(readErr)
+							return
 						}
-						// 非流返回函数调用，流式返回文本，分别覆盖两种响应重建。
+						session = r.Header.Get("Session-Id")
+						// 客户端凭据不能覆盖渠道凭据，会话头则应完整保留。
+						if r.Header.Get("Authorization") != "Bearer "+testAPIKey {
+							t.Error("upstream credential not applied")
+						}
 						if stream {
+							// 原始完成事件与最终快照都要到达客户端，不能重建 custom 事件。
+							// 故意只发两个工具 done，快照中的文本不应触发额外工具完成事件。
+							// 不使用 Chat 的 [DONE]，避免测试误把 Chat 结束规则当作 Responses 合同。
 							w.Header().Set("Content-Type", "text/event-stream")
-							io.WriteString(w, openAIChatFinalStream)
+							io.WriteString(w, toolEvents)
+							fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":%s}\n\n", gjson.Get(output, "0").Raw)
+							fmt.Fprintf(w, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":%s}\n\n", gjson.Get(output, "1").Raw)
+							fmt.Fprintf(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":%s}\n\n", responseBody)
 						} else {
-							io.WriteString(w, `{"id":"chat_1","object":"chat.completion","created":1,"model":"served","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}`)
+							w.Header().Set("Content-Type", "application/json")
+							io.WriteString(w, responseBody)
 						}
 					}))
 					defer server.Close()
-					// 自定义前缀保护 /v1 拼接，避免只在默认地址上碰巧通过。
-					// manager 运行真实 Bifrost Core，只有网络另一端是测试替身。
-					// 凭据使用仓库公共 fixture，测试输出不包含任何线上信息。
-					manager, target := newOpenCodeManagerForTest(t, id, server.URL+"/custom-root")
-					// 同时携带 context、effort 与 encrypted_content 请求选项，
-					// 防止修复只删一个字段却把下一项不兼容参数继续发给目标。
-					// include 是输出偏好，与已经存在的加密输入历史不是同一语义。
-					// instructions 与 input 并存，转换不能让其中一个覆盖另一个。
-					body := []byte(fmt.Sprintf(`{"model":"gpt-6-luna","stream":%t,"store":false,"instructions":"Keep instructions","input":[{"role":"user","content":"Read file"}],"reasoning":{"effort":"high","context":"all_turns","summary":"auto"},"include":["reasoning.encrypted_content"],"tools":[{"type":"function","name":"read_file","parameters":{"type":"object","properties":{}}}]}`, stream))
-					spec := utilitySpec(id, protocol.OpenAIResponses, execution.OperationResponsesCreate, http.MethodPost, "/v1/responses", body)
-					spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "gpt-6-luna", model
-					// 使用注册表冻结真实目标的 RouteMode，不在测试中强行指定转换模式。
-					spec = freezeTestAttempt(spec)
-					// 执行前后的输入必须相同，避免重试或并行请求共享可变草稿。
-					original := spec.Clone()
-					if stream {
-						// StreamEventData 是客户端真正收到的事件，不读取 SDK 内部状态。
-						// 后续要求完整终态，避免仅建立流连接就被测试算作成功。
-						var output bytes.Buffer
-						result := manager.ExecuteStream(t.Context(), spec, func(event execution.StreamEvent) error {
-							if event.Kind == execution.StreamEventData {
-								output.Write(event.Data)
+					// 使用真实鉴权、模型映射、冻结路由及执行日志链路。
+					// 本机 HTTP 上游由真实执行器访问，模型路由没有被 mock。
+					engine, manager, input, sink, _ := newAggregationSearchGateway(t, id, server.URL+"/team-a")
+					input.Groups[0].Models = []state.ModelConfig{{ID: model, Alias: "public"}}
+					// 不添加参数覆盖；只允许既有模型映射改变 model。
+					input.Groups[0].Settings = nil
+					if _, err := manager.Publish(input); err != nil {
+						t.Fatal(err)
+					}
+					// 第一轮声明能力，第二轮携带原生搜索/custom 历史继续任务。
+					// grammar 使用合成的未知文法，证明不再存在本地 exec 文法白名单。
+					// additional_tools 应留在 input，不能被 Chat 准备阶段提升或删掉。
+					// 搜索输出和 custom 输出并存，可同时覆盖两种原先拒绝的历史项。
+					// call_id 必须关联上轮工具调用，不能替换成响应项的 id。
+					for turn := 0; turn < 2; turn++ {
+						history := `[{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},{"role":"user","content":"synthetic task"}]`
+						if turn == 1 {
+							history = strings.TrimSuffix(output, "]") + `,{"type":"custom_tool_call_output","call_id":"call_1","output":"synthetic result"}]`
+						}
+						// reasoning.context 曾触发上游错误，此处证明网关不再私自删除它。
+						// include 是输出偏好，不能据此删掉工具或把请求改成其他协议。
+						// store=false 保留现有无状态合同，不靠改变存储选项触发上游回退。
+						body := fmt.Sprintf(`{"model":"public","stream":%t,"store":false,"input":%s,"reasoning":{"context":"all_turns","effort":"high"},"include":["reasoning.encrypted_content"],"tools":[{"type":"web_search","external_web_access":true},{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}]},{"type":"tool_search","execution":"client","parameters":{"type":"object"}}],"tool_choice":"auto"}`, stream, history)
+						request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+						request.Header.Set("Authorization", "Bearer gl-search-client")
+						request.Header.Set("Content-Type", "application/json")
+						request.Header.Set("Session-Id", "synthetic-conversation")
+						response := httptest.NewRecorder()
+						engine.ServeHTTP(response, request)
+						if response.Code != http.StatusOK || calls != turn+1 || session != "synthetic-conversation" {
+							t.Fatalf("native request failed: status=%d calls=%d body=%s", response.Code, calls, response.Body.String())
+						}
+						// 整体比较请求，防止只检查 tool 名而忽略参数或完整历史被丢弃。
+						// JSON 对象键顺序不属于合同，因此比较解码后的值而非序列化顺序。
+						// 数组顺序属于合同，DeepEqual 会检查工具及历史项的次序。
+						var want, got map[string]any
+						if err := json.Unmarshal([]byte(body), &want); err != nil {
+							t.Fatal(err)
+						}
+						if err := json.Unmarshal(received, &got); err != nil {
+							t.Fatal(err)
+						}
+						want["model"] = model
+						if !reflect.DeepEqual(got, want) {
+							t.Fatalf("native payload changed: %s", received)
+						}
+						// 流式检查最终快照及每个完成事件，避免重复发布工具导致重复执行。
+						// 没有最终事件时保留空值，后续解析会失败而非借用模拟上游快照。
+						final := response.Body.String()
+						if stream {
+							if !strings.Contains(response.Body.String(), toolEvents) {
+								t.Fatal("native tool stream events changed")
 							}
-							return nil
-						})
-						if result.Error != nil || result.StatusCode != http.StatusOK {
-							t.Fatalf("execution failed: %+v", result.Error)
+							final = ""
+							for _, line := range strings.Split(response.Body.String(), "\n") {
+								if strings.HasPrefix(line, "data: ") && gjson.Get(strings.TrimPrefix(line, "data: "), "type").String() == "response.completed" {
+									final = gjson.Get(strings.TrimPrefix(line, "data: "), "response").Raw
+								}
+							}
+							if strings.Count(response.Body.String(), "event: response.output_item.done\n") != 2 {
+								t.Fatal("tool done events changed")
+							}
 						}
-						// 日志依赖这个公开字段解释转换后的实际协议。
-						if result.UpstreamProtocol != protocol.OpenAICompletions {
-							t.Errorf("unexpected upstream protocol: %s", result.UpstreamProtocol)
+						// 返回模型仍为用户别名，Token 用量与引用则沿用上游证据。
+						// annotations 的 URL、标题和文本范围必须一起保留，不能只保留正文。
+						// 比较整个 output 也检查 namespace、自由文本及搜索 action 的结构。
+						if gjson.Get(final, "model").String() != "public" || gjson.Get(final, "usage.total_tokens").Int() != 15 {
+							t.Fatalf("response identity or usage lost: %s", final)
 						}
-						if !strings.Contains(output.String(), "response.completed") || !strings.Contains(output.String(), "done") {
-							t.Errorf("missing completed text: %s", output.String())
+						var wantOutput, gotOutput any
+						if err := json.Unmarshal([]byte(output), &wantOutput); err != nil {
+							t.Fatal(err)
 						}
-						// 上游有用量时必须保留证据，不能因格式转换变成未知或免费。
-						if result.Usage == nil {
-							t.Error("usage missing")
+						if err := json.Unmarshal([]byte(gjson.Get(final, "output").Raw), &gotOutput); err != nil {
+							t.Fatal(err)
 						}
-					} else {
-						result := manager.Execute(t.Context(), spec)
-						if result.Error != nil || result.StatusCode != http.StatusOK {
-							t.Fatalf("execution failed: %+v", result.Error)
+						if !reflect.DeepEqual(wantOutput, gotOutput) {
+							t.Fatalf("native output changed: %s", final)
 						}
-						// 日志依赖这个公开字段解释转换后的实际协议。
-						if result.UpstreamProtocol != protocol.OpenAICompletions {
-							t.Errorf("unexpected upstream protocol: %s", result.UpstreamProtocol)
+						// 审计必须反映真实上游协议，不能继续标注为 Chat 转换。
+						// 两轮应形成两个独立请求事件，每轮只对应一次供应商执行。
+						if len(sink.events) != turn+1 || len(sink.events[turn].Attempts) != 1 {
+							t.Fatal("unexpected attempt count")
 						}
-						// 下游仍使用 Responses，直接透传 Chat 的 choices 会破坏客户端。
-						// 函数名称和 call_id 是下一回合回传结果的关联键。
-						// 不能只保留输出文字而丢失需要客户端执行的工具调用。
-						if gjson.GetBytes(result.Body, "object").String() != "response" || gjson.GetBytes(result.Body, "output.0.call_id").String() != "call_1" || gjson.GetBytes(result.Body, "output.0.name").String() != "read_file" {
-							t.Errorf("tool call not preserved: %s", result.Body)
-						}
-						// 上游有用量时必须保留证据，不能因格式转换变成未知或免费。
-						if result.Usage == nil {
-							t.Error("usage missing")
-						}
-					}
-					if !bytes.Equal(original.Body, spec.Body) {
-						t.Error("caller body mutated")
-					}
-					// 对真实线上的四个关键字段逐项核对，不复制转换算法计算期望。
-					// 目标模型决定路由，源别名不应出现在上游 model 中。
-					// 用户消息与全局指令分别保留，函数 schema 走原 SDK 编码。
-					for path, want := range map[string]string{"model": model, "messages.0.content": "Keep instructions", "messages.1.content": "Read file", "tools.0.function.name": "read_file"} {
-						if got := gjson.GetBytes(received, path).String(); got != want {
-							t.Errorf("%s=%q, want %q", path, got, want)
-						}
-					}
-					// 复用 Compatible 的推理语义：不给其他厂商伪造 GPT 专属推理档位。
-					for _, path := range []string{"reasoning", "reasoning_effort", "include"} {
-						if gjson.GetBytes(received, path).Exists() {
-							t.Errorf("GPT-only parameter retained: %s", path)
+						attempt := sink.events[turn].Attempts[0]
+						if attempt.RouteMode != channel.RouteNative || attempt.UpstreamProtocol != protocol.OpenAIResponses {
+							t.Fatalf("unexpected route: %+v", attempt)
 						}
 					}
 				})
@@ -332,209 +368,88 @@ func TestOpenCodeMappedResponsesUsesChat(t *testing.T) {
 	}
 }
 
-// 新任务转换只接受可移植历史；在真正发送 HTTP 前验证拒绝与保留边界。
-// 请求主体使用合成数据，不复制用户线上任务或凭据。
-// 这些失败必须在派发前明确，不能消耗供应商额度后再提示不支持。
-// 成功用例保护新任务生成工具调用后的正常第二轮。
-// 不承诺模型切换时能把旧厂商的私有状态迁移到新厂商。
-func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
-	// 动态工具声明与普通回合共用历史，确保成功不是靠丢弃调用结果实现。
-	const toolTurn = `[{"role":"user","content":"read"},{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"file contents"}]}]`
-	// additional_tools 在输入里携带定义，目标 Chat 请求仍须得到完整函数 schema。
-	dynamicTurn := `[{"type":"additional_tools","tools":[{"type":"function","name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}]},` + toolTurn[1:]
-	// 失败用例只改变影响可移植性的状态，正文其余部分保持最小有效。
-	// 不把 previous_response_id 当普通字符串删掉后重新开始任务。
-	// 加密推理即使同时存在文字摘要，也不能假装完整迁移。
-	// 压缩记录和厂商内置工具都有独立的上游状态。
-	// 未适配的自定义语法不是 JSON 函数 schema，不能静默忽略。
-	for _, tc := range []struct {
-		name, extra, input string
-		reject             bool
-		dynamic            bool
-		historyType        string
-	}{
-		{name: "hosted tool", extra: `,"tools":[{"type":"web_search"}]`, input: `"hello"`, reject: true},
-		{name: "custom tool", extra: `,"tools":[{"type":"custom","name":"patch"}]`, input: `"hello"`, reject: true},
-		{name: "hosted tool history", input: `[{"type":"web_search_call","id":"ws_1"}]`, reject: true, historyType: "web_search_call"},
-		// 未实现的历史保留拒绝，但日志须能区分类型，不再只返回同一笼统原因。
-		// custom 现在进入专用适配校验；缺少受支持声明时仍应明确拒绝。
-		{name: "custom tool history", input: `[{"type":"custom_tool_call","name":"patch","input":"private-history-marker"}]`, reject: true},
-		{name: "tool search history", input: `[{"type":"tool_search_output","tools":[]}]`, reject: true, historyType: "tool_search_output"},
-		// 未知 type 也属于不可信输入，诊断不能把它原样写到日志。
-		{name: "unknown history", input: `[{"type":"private-history-marker"}]`, reject: true, historyType: "unknown"},
-		{name: "previous response", extra: `,"previous_response_id":"resp_old"`, input: `"continue"`, reject: true},
-		{name: "conversation", extra: `,"conversation":"conv_old"`, input: `"continue"`, reject: true},
-		{name: "encrypted reasoning", input: `[{"type":"reasoning","encrypted_content":"opaque"},{"role":"user","content":"continue"}]`, reject: true},
-		{name: "compaction", input: `[{"type":"compaction","encrypted_content":"opaque"},{"role":"user","content":"continue"}]`, reject: true},
-		// 无状态工具回合依赖完整 call_id 与 output，不能误判成跨厂商旧会话。
-		{name: "complete tool turn", input: toolTurn},
-		// 已有 Compatible 提升逻辑不能被 OpenCode 的历史白名单挡住。
-		{name: "dynamic function tools", input: dynamicTurn, dynamic: true},
-		// 白名单选择也必须在工具提升之后执行，否则声明存在但解析不到目标。
-		{name: "dynamic allowed tools", input: dynamicTurn, extra: `,"tool_choice":{"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"read_file"}]}`, dynamic: true},
-		// 动态声明不是绕过原有工具能力校验的入口。
-		{name: "dynamic custom tool", input: `[{"type":"additional_tools","tools":[{"type":"custom","name":"patch"}]}]`, reject: true},
-		{name: "dynamic hosted namespace", input: `[{"type":"additional_tools","tools":[{"type":"namespace","name":"files","tools":[{"type":"web_search"}]}]}]`, reject: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// 零调用是本地拒绝的可观察证据，而非仅检查错误文案。
-			// 成功回合则必须恰好调用一次，不能先失败再偷偷回退。
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// 对应函数输出应成为 tool 消息，顺序保持在 assistant 调用后。
-				// 数组形式的文本输出沿用已有 Compatible 展开规则。
-				calls++
-				wire, _ := io.ReadAll(r.Body)
-				// 保留调用身份和结果文本，目标仍是本轮固定的 Kimi。
-				if gjson.GetBytes(wire, "messages.1.tool_calls.0.id").String() != "call_1" || gjson.GetBytes(wire, "messages.2.tool_call_id").String() != "call_1" || gjson.GetBytes(wire, "messages.2.content").String() != "file contents" {
-					t.Errorf("tool continuation changed: %s", wire)
-				}
-				// 同时断言定义与历史均到达上游，不能只检查 HTTP 成功。
-				if tc.dynamic && (gjson.GetBytes(wire, "tools.0.function.name").String() != "read_file" || gjson.GetBytes(wire, "tools.0.function.parameters.properties.path.type").String() != "string") {
-					t.Errorf("dynamic tool definition lost: %s", wire)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				io.WriteString(w, openAIChatFinalResponse)
-			}))
-			defer server.Close()
-			manager, target := newOpenCodeManagerForTest(t, channel.OpenCodeGo, server.URL+"/zen/go")
-			// New API 已改名时，gpt-load 收到的客户端名称与目标一致，也必须转换。
-			// 同目标的工具结果回传不属于运行中更换供应商，仍是支持范围。
-			// 这里特意令两种模型名相同，防止错误地只在名称不同时适配。
-			// 回归不依赖 New API 私有请求头，渠道映射也能复用此入口。
-			body := []byte(`{"model":"kimi-k3","store":false,"input":` + tc.input + tc.extra + `}`)
-			spec := utilitySpec(channel.OpenCodeGo, protocol.OpenAIResponses, execution.OperationResponsesCreate, http.MethodPost, "/v1/responses", body)
-			spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "kimi-k3", "kimi-k3"
-			result := manager.Execute(t.Context(), freezeTestAttempt(spec))
-			// 检查稳定错误码与派发状态，避免坏历史被当作厂商暂时故障。
-			if tc.reject {
-				// 禁止先向供应商发送、再把状态丢失解释成可重试错误。
-				if result.Error == nil || result.Error.Code != execution.ErrorCodeCriticalSemanticLoss || result.DispatchState != execution.DispatchNotSent || calls != 0 {
-					t.Fatalf("state not rejected before sending: %+v, calls=%d", result.Error, calls)
-				}
-				// 只允许固定类型和数组位置进入诊断，完整正文仍不记录。
-				if tc.historyType != "" && (!strings.Contains(result.Error.Summary, "input[0] type "+tc.historyType) || strings.Contains(result.Error.Summary, "private-history-marker")) {
-					t.Errorf("unsafe or unhelpful history error: %s", result.Error.Summary)
-				}
-				if tc.name == "custom tool history" && result.Error.Summary != "custom history requires a supported exec declaration" {
-					t.Errorf("unexpected undeclared custom history error: %s", result.Error.Summary)
-				}
-			} else if result.Error != nil || calls != 1 || result.StatusCode != 200 {
-				t.Fatalf("tool continuation failed: %+v, calls=%d", result.Error, calls)
-			}
-		})
-	}
-}
-
-// 原生 GPT 必须保留专属参数；转换不能以删除所有模型的 reasoning 作为修复。
-// 与转换目标使用同一渠道和执行器，验证规则边界而不是另一套模拟实现。
-// 模型选择为 GPT 时，不应改成 Chat 或删除其原生推理控制。
-// 成功响应允许空输出，这是 Responses 协议的有效结构。
-// 此处不验证模型效果，只验证路由边界与原样转发合同。
-// 对未知模型不作能力猜测的约束由同一注册表实现。
-func TestOpenCodeGPTKeepsNativeReasoning(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wire, _ := io.ReadAll(r.Body)
-		if r.URL.Path != "/zen/go/v1/responses" || gjson.GetBytes(wire, "reasoning.context").String() != "all_turns" || gjson.GetBytes(wire, "reasoning.effort").String() != "high" {
-			t.Errorf("GPT native request changed: %s %s", r.URL.Path, wire)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed","model":"gpt-6-luna","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
-	}))
-	defer server.Close()
-	manager, target := newOpenCodeManagerForTest(t, channel.OpenCodeGo, server.URL+"/zen/go")
-	spec := utilitySpec(channel.OpenCodeGo, protocol.OpenAIResponses, execution.OperationResponsesCreate, http.MethodPost, "/v1/responses", []byte(`{"model":"gpt-6-luna","input":"hello","store":false,"reasoning":{"effort":"high","context":"all_turns"}}`))
-	// 源与目标相同是普通调用的常见形状，必须保持既有行为。
-	// 客户端能力和实际模型一致时，无需兼容降级。
-	spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "gpt-6-luna", "gpt-6-luna"
-	result := manager.Execute(t.Context(), freezeTestAttempt(spec))
-	if result.Error != nil || result.StatusCode != 200 || result.UpstreamProtocol != protocol.OpenAIResponses {
-		t.Fatalf("native request failed: %+v", result)
-	}
-}
-
-// 覆盖真实入口的认证、别名解析、路由冻结和日志，防止执行器测试绕过错误的调度。
-// 测试日志只断言协议与目标，不依赖上游返回的模型字段推断计费身份。
-// 此测试运行完整 Gin 路由，认证、状态快照和执行转发器都是真实实现。
-// 只把供应商网络替换成本机 HTTP 服务，不依赖外部余额或可用性。
-// 已有 state.Manager.Publish 会重新编译路由，而非测试直接修改执行对象。
-// 因此这条用例也验证配置改变后下一次请求采用新模型的行为。
-// 同时检查流式工具输出，覆盖执行器与网关写出逻辑之间的连接。
-func TestOpenCodeMappingGatewaySelectsConvertedRoute(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				wire, _ := io.ReadAll(r.Body)
-				if r.URL.Path != "/team-a/v1/chat/completions" || gjson.GetBytes(wire, "model").String() != "glm-5.3" || gjson.GetBytes(wire, "reasoning.context").Exists() {
-					t.Errorf("wrong mapped target: %s %s", r.URL.Path, wire)
-				}
-				if stream {
-					w.Header().Set("Content-Type", "text/event-stream")
-					io.WriteString(w, compatibleToolStream(true, true, false))
-				} else {
+// 原生路径必须把真实上游错误留给客户端，不能删工具后重试成成功。
+// 此测试仅模拟供应商拒绝，不把本地转发通过当成供应商能力承诺。
+// 模拟服务返回固定错误，不包含用户输入、账号标识或真实供应商诊断。
+// 普通和流式请求都可能在响应头阶段失败，分别检查派发次数。
+// 探测单独验证 Responses 路径，避免保留旧的 Chat 探测捷径。
+// 自定义入口遵循聚合网关的根地址合同，由执行器追加 /v1/responses。
+// 失败样本是参数错误，不依赖任何真实账号或供应商错误内容。
+// 这个用例不承诺厂商接受所有工具，只要求失败真实可见。
+func TestOpenCodeNativeErrorsAndProbe(t *testing.T) {
+	for _, id := range []channel.ID{channel.OpenCodeGo, channel.OpenCodeZen} {
+		for _, mode := range []string{"unary", "stream", "probe"} {
+			t.Run(string(id)+"/"+mode, func(t *testing.T) {
+				calls := 0
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					calls++
+					// 失败后不得转向 Chat；自定义路径前缀也必须保留。
+					// 这里的 /openai 代表协议入口前缀，不改变原有 URL 拼接规则。
+					if r.URL.Path != "/openai/v1/responses" {
+						t.Errorf("unexpected path: %s", r.URL.Path)
+					}
+					// 网络读取异常应直接暴露，不以缺字段错误掩盖实际失败。
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					// 探测仍指定真实目标模型，不借用 GPT 型号替目标宣称成功。
+					if gjson.GetBytes(body, "model").String() != "kimi-k3" {
+						t.Error("probe/model identity changed")
+					}
 					w.Header().Set("Content-Type", "application/json")
-					io.WriteString(w, openAIChatFinalResponse)
+					if mode == "probe" {
+						// 探测输出沿用供应商 Responses 协议，不经过 Chat 反向转换。
+						// completed 和 usage 是探测有效性的证据，不能仅凭 HTTP 200 判定。
+						io.WriteString(w, `{"id":"probe","object":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
+						return
+					}
+					// 断言搜索声明确实到达上游，失败不是本地工具白名单触发的。
+					// 返回标准参数错误，验证通用错误链仍然能解析供应商拒绝。
+					if gjson.GetBytes(body, "tools.0.type").String() != "web_search" {
+						t.Error("search declaration lost")
+					}
+					w.WriteHeader(http.StatusBadRequest)
+					io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"synthetic unsupported web_search"}}`)
+				}))
+				defer server.Close()
+				manager, target := newOpenCodeManagerForTest(t, id, server.URL+"/openai")
+				// 凭据、调度规格和协议模式来自真实运行时，只有供应商网络被隔离。
+				// 模型使用旧转换规则命中的 Kimi，避免未知模型本来就原生造成假通过。
+				spec := utilitySpec(id, protocol.OpenAIResponses, execution.OperationResponsesCreate, http.MethodPost, "/v1/responses", []byte(`{"model":"kimi-k3","input":"synthetic","store":false,"tools":[{"type":"web_search"}]}`))
+				spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "kimi-k3", "kimi-k3"
+				if mode == "probe" {
+					// 管理探测没有客户端正文，按操作合同由执行器生成最小请求。
+					// 冻结规格之前切换操作，确保测试与真实调度时序一致。
+					spec.Operation, spec.Method, spec.Path, spec.Body = execution.OperationProbe, "", "", nil
 				}
-			}))
-			defer server.Close()
-			engine, manager, input, sink, _ := newAggregationSearchGateway(t, channel.OpenCodeGo, server.URL+"/team-a")
-			// 复用隔离的组配置 fixture，再发布本用例自己的模型别名。
-			// 模型目录不是装饰数据：必须参与实际候选路由的编译。
-			input.Groups[0].Models = []state.ModelConfig{{ID: "glm-5.3", Alias: "gpt-6-luna"}}
-			// 不依赖管理员参数覆盖，让测试只观察自动协议转换。
-			input.Groups[0].Settings = nil
-			if _, err := manager.Publish(input); err != nil {
-				t.Fatal(err)
-			}
-			body := fmt.Sprintf(`{"model":"gpt-6-luna","input":"start task","store":false,"stream":%t,"reasoning":{"context":"all_turns","effort":"high"}}`, stream)
-			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
-			// 使用 fixture 的受限测试 Key，不能绕过入口直接调用处理函数。
-			request.Header.Set("Authorization", "Bearer gl-search-client")
-			request.Header.Set("Content-Type", "application/json")
-			response := httptest.NewRecorder()
-			engine.ServeHTTP(response, request)
-			if response.Code != 200 {
-				t.Fatalf("gateway failed: %d %s", response.Code, response.Body.String())
-			}
-			// 流式必须完整恢复并行函数调用及末尾用量，不能仅返回一个成功 HTTP 头。
-			if stream && (!strings.Contains(response.Body.String(), "response.completed") || !strings.Contains(response.Body.String(), "function_call") || !strings.Contains(response.Body.String(), "call_1")) {
-				t.Errorf("tool stream lost: %s", response.Body.String())
-			}
-			// 单次请求只形成一条审计事件，不把协议转换伪造成第二次调用。
-			// 实际协议来自执行结果，不能仍按入口路径误标为原生 Responses。
-			if len(sink.events) != 1 {
-				t.Fatalf("log count=%d", len(sink.events))
-			}
-			event := sink.events[0]
-			if len(event.Attempts) != 1 || event.Attempts[0].RouteMode != channel.RouteConverted || event.Attempts[0].UpstreamProtocol != protocol.OpenAICompletions {
-				t.Errorf("conversion not visible in logs: %+v", event.Attempts)
-			}
-		})
-	}
-}
-
-// 探测返回也必须符合所选客户端协议，否则管理页会把可用模型判成失败。
-// 探测与用户请求复用模型规则，但自身没有用户输入历史。
-// 模拟上游返回 Chat，探测校验看到的必须已转换回 Responses。
-// 这可捕获“改了请求端点，却忘记改探测结果”的独立回归。
-func TestOpenCodeChatModelResponsesProbe(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		wire, _ := io.ReadAll(r.Body)
-		// 小预算探测仍请求 Chat，不借用真实用户任务来验证连接。
-		if r.URL.Path != "/v1/chat/completions" || !gjson.GetBytes(wire, "messages").IsArray() {
-			t.Errorf("invalid probe: %s %s", r.URL.Path, wire)
+				spec = freezeTestAttempt(spec)
+				var result execution.StreamResult
+				var wire strings.Builder
+				if mode == "stream" {
+					// 流式的失败不应发布 response.completed，更不能生成假搜索结果。
+					result = manager.ExecuteStream(t.Context(), spec, func(e execution.StreamEvent) error { wire.Write(e.Data); return nil })
+				} else {
+					unary := manager.Execute(t.Context(), spec)
+					result = execution.StreamResult{StatusCode: unary.StatusCode, Error: unary.Error, UpstreamProtocol: unary.UpstreamProtocol}
+				}
+				// 每种操作恰好一次调用；原生失败不触发本地协议降级。
+				// 错误检查同时要求非空证据，避免仅改 HTTP 状态而吞掉真实失败。
+				// 流与非流只合并共有的结果字段，不伪造或解析供应商正文。
+				// 保留普通原生协议测试，另行覆盖 GPT、Chat 与 Anthropic 的已有行为。
+				// 即使业务结果失败，上游协议也应记录为 Responses 供日志排障。
+				if calls != 1 || result.UpstreamProtocol != protocol.OpenAIResponses {
+					t.Fatalf("unexpected execution: calls=%d protocol=%s", calls, result.UpstreamProtocol)
+				}
+				if mode == "probe" {
+					if result.Error != nil || result.StatusCode != 200 {
+						t.Fatalf("native probe failed: %+v", result.Error)
+					}
+				} else if result.Error == nil || result.StatusCode != 400 || strings.Contains(wire.String(), "response.completed") {
+					t.Fatalf("upstream rejection hidden: status=%d error=%+v", result.StatusCode, result.Error)
+				}
+			})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, openAIChatFinalResponse)
-	}))
-	defer server.Close()
-	manager, target := newOpenCodeManagerForTest(t, channel.OpenCodeGo, server.URL)
-	// 探测不携带 method/path/body；它们由执行器按操作合同生成。
-	// client_model 仍用于标识所测模型，不能省略成无模型请求。
-	spec := utilitySpec(channel.OpenCodeGo, protocol.OpenAIResponses, execution.OperationProbe, "", "", nil)
-	spec.TargetConfig, spec.ClientModel, spec.UpstreamModel = target.TargetConfig, "glm-5.3", "glm-5.3"
-	result := manager.Execute(t.Context(), freezeTestAttempt(spec))
-	if result.Error != nil || result.StatusCode != 200 || result.UpstreamProtocol != protocol.OpenAICompletions || gjson.GetBytes(result.Body, "object").String() != "response" {
-		t.Fatalf("invalid converted probe: %+v", result.Error)
 	}
 }

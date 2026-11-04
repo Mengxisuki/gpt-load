@@ -52,8 +52,6 @@ type preparedAttempt struct {
 	secrets            []string
 	// embeddingConversion 记录 OpenAI Embeddings → Gemini 转换回写响应所需的信息。
 	embeddingConversion *geminiembedding.Conversion
-	// execBridge 只在已验证的 OpenCode 自定义工具转换中设置，不影响原生请求。
-	execBridge *openCodeExecBridge
 }
 
 type unarySDKResult struct {
@@ -528,11 +526,6 @@ func (r *Runtime) prepare(spec execution.AttemptSpec, stream bool) (preparedAtte
 	}
 	if providerKind == channel.ProviderDeepSeek && spec.ClientProtocol == protocol.Anthropic {
 		directKey.UseAnthropicEndpoints = schemas.Ptr(true)
-	}
-	// 只有显式声明的 OpenCode 模型转换路由进入兼容执行，其他聚合商仍原样转发。
-	// 在凭据与目标校验完成后准备，不改变调度、模型身份或资金来源。
-	if providerKind == channel.ProviderMultiProtocolGateway && mode == channel.RouteConverted {
-		return r.prepareOpenCodeResponses(spec, preparedAttempt{provider: provider, directKey: directKey, secrets: secrets}, safeQuery)
 	}
 	if providerKind == channel.ProviderCline {
 		return r.prepareCline(spec, provider, directKey, secrets, stream, safeQuery)

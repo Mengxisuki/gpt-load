@@ -1,5 +1,21 @@
 # 排障经验
 
+## 2026-11-04 05:20:11 +00:00 — 模型端点表不能代替 Codex 接入及搜索能力核查
+
+纠正前述排查前提：[OpenCode Codex 接入文档](https://opencode.ai/v2/docs/console/harnesses/codex/)明确说明 Console 为不接收 Responses 的模型转换请求，Go 示例为 `kimi-k3`、`wire_api="responses"`、`https://opencode.ai/inference/go/openai/v1`。因此不能从模型表中的 Chat 端点推断 Kimi/GLM 不能直连 Responses，也不能把另购搜索服务当作唯一方案。当前 GPT-Load 的 `resolveOpenCodeResponsesRoute` 按三个模型前缀强制 Chat，`prepareOpenCodeResponses` 拒绝 web_search；这是本地已确认的拦截点，是否应改为上游直通需结合真实工具行为验证。
+
+另一方面，[开放 issue #57397](https://github.com/anomalyco/opencode/issues/57397)报告同一 Go Responses 入口因所选上游不同，存在转换路径丢弃 web_search、原生路径返回 web_search_call 的差异；已读取完整正文、评论及未合并 PR #42231 的历史补丁。此为报告者实测，非本项目验证或官方能力承诺。现行托管推理转换代码不在已查公开 dev 树内（本次树 SHA `55276f2108c8853f94cf16dc530e7754a6ce8318`），不能拿历史补丁当线上代码。
+
+[Console Hosted Web Search](https://opencode.ai/v2/docs/console/websearch/)是已存在的独立搜索服务，文档要求工作区启用、每次成功搜索 $0.01；页面描述 OpenCode 客户端使用它，尚不能证明 Codex 的 Responses web_search 自动接到它。后续首先对比具体模型直连 Responses 与 Oak 转换路径，验收搜索调用、真实来源、流式终态和续轮；HTTP 200 或能回答普通问题不等于搜索通过。此次未调用真实模型、未改生产，不擅自丢工具、改 store 触发上游回退或扩大收费。
+
+## 2026-11-04 05:12:49 +00:00 — 会话头缺失先核对入口与实际透传配置
+
+只读核查 wdm：New API 的 OakGL/OakGL_GPT 渠道已配置 `header_override={"*":true}`；`relay/channel/api_request.go::processHeaderOverride` 按键启用透传，值不参与解析。GPT-Load 的 `safeRequestHeaders`/`safePassthroughHeaders` 未过滤 Session-Id 或 X-Opencode-Session。不能仅因适配器默认不复制这些头就认定线上丢头。
+
+Caddy 精确请求记录证明：04:38:54 UTC 两条上游报缺会话头的 Chat 请求在入口就没有 Session-Id、Thread-Id 或 X-Opencode-Session；成功 GLM Chat 携带 X-Opencode-Session。两条被 web_search 拦截的 Responses 请求携带 Session-Id/Thread-Id，直接失败仍是本地托管工具合同拒绝。没有证据支持新增随机会话或强制改名；本轮未改业务代码或生产配置。
+
+[OpenCode Go 文档](https://opencode.ai/docs/go/)说明要求稳定会话，支持 Codex 原生会话头，代理应保留。[OpenAI 搜索文档](https://developers.openai.com/api/docs/guides/tools-web-search)中的 Responses web_search 是服务端执行的托管工具；已查 Go/Zen 文档未确认 Kimi/GLM API 提供此合同，不能据客户端能联网推断 API 自带搜索。当前只完成源码、配置与入口日志核查，未重放供应商请求；搜索后端与完整适配方案仍待确定。
+
 ## 2026-11-01 07:52:24 +00:00 — 原生健康、管理API与测试工具分别核对
 
 现象：GPT-Load缺少前端构建时仍可返回成功健康页；管理API采用code=0而非NewApi的success；本机Go回归的容器合同测试因Docker Compose2.31.0不支持--no-env-resolution失败。
@@ -98,3 +114,11 @@
 修复：`compatible_stream.go` 以已经生成的首个终态为边界，继续收取尾部用量及上游错误，但不再转换无输出的尾块；终态后的正文、推理或工具增量明确报错并保留已观察用量，禁止静默截断或重复执行。普通函数和 custom 共用边界，不放宽历史重复校验，不擅自去重已有历史。
 
 验证：`TestOpenCodeExecTerminalTrailer/repeated_role_finish` 先红（两次事件且续轮重复 ID）后绿，覆盖尾部用量、晚到错误、新输出拒绝及实际续轮；普通并行函数测试也检查每个调用只完成一次。执行层、网关、渠道、dialect 回归、exec/Compatible 定向竞态、vet 与构建通过。仅本地修改，未提交、推送、部署或调用真实模型；线上触发条件及新版本实测仍待确认。
+
+## 2026-11-04 05:04:25 +00:00 — 简单 Chat 成功不能验证携带托管工具的 Responses 请求
+
+线上已运行 `oak-c2f7279be06b-41772333177-1`，启动时间为 04:21:59.487 UTC，上一条尾部事件修复已发布。用户指认的 04:31:15 Kimi 与 04:38:02 GLM Flash 请求均为 `/v1/responses`，只有四项普通消息历史，但 `tools[8]` 声明 `web_search`。无 custom 调用历史、旧响应引用或加密历史；被 `opencode_responses.go` 工具白名单拒绝，422 / not_sent，Caddy 对外也记录 422。不是重复 exec 或未发布问题。
+
+对照成功请求 04:39:25 使用 `/v1/chat/completions`、model=glm-5.3，仅有 model/messages/max_tokens/stream，没有工具声明，走 OpenCode Go 原生 Chat；日志为 success、usage complete，New API 收到 done。它还携带 X-Opencode-Session，而两条指定 Responses 请求没有该头。04:38:54 的另外两条 GLM 上游请求明确返回 400：缺少 x-opencode-session；这是独立的渠道要求，不能当作两条 not_sent 请求的当前错误原因。另有一条 Kimi 上游 403，仅摘要不足以确定细因。
+
+结论：可调用模型不等于兼容客户端默认工具集合。已知 exec 的桥接不等于实现 OpenAI 托管 web_search，即使模型尚未选择搜索，声明也会被拒绝。不能为通过请求而静默删除工具或伪装搜索结果。若继续实施，应先明确客户端不声明该托管能力，还是通过真实可执行的搜索后端实现完整合同；同时核对渠道的合法会话标识传递。此次只读核对日志与请求，未改业务、配置或重放任务。

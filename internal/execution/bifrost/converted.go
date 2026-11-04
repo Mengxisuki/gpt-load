@@ -307,8 +307,7 @@ func (r *Runtime) executeConvertedResponses(
 		var response *schemas.BifrostResponsesResponse
 		var bifrostError *schemas.BifrostError
 		if r.usesCompatibleChat(spec) {
-			// 请求准备阶段确认的 custom 契约随 attempt 传入，响应端不重新猜测工具类型。
-			response, bifrostError = r.compatibleResponsesRequest(bifrostContext, prepared.responsesRequest, prepared.execBridge)
+			response, bifrostError = r.compatibleResponsesRequest(bifrostContext, prepared.responsesRequest)
 		} else {
 			response, bifrostError = r.core.ResponsesRequest(bifrostContext, prepared.responsesRequest)
 		}
@@ -634,7 +633,7 @@ func (r *Runtime) executeConvertedResponsesStream(
 		var bifrostError *schemas.BifrostError
 		if r.usesCompatibleChat(spec) {
 			// 流式与普通响应使用同一声明契约，具体事件状态仍在每次流内独立创建。
-			stream, bifrostError = r.compatibleResponsesStream(bifrostContext, prepared.responsesRequest, prepared.execBridge)
+			stream, bifrostError = r.compatibleResponsesStream(bifrostContext, prepared.responsesRequest)
 		} else {
 			stream, bifrostError = r.core.ResponsesStreamRequest(bifrostContext, prepared.responsesRequest)
 		}

@@ -11,18 +11,15 @@ import (
 )
 
 func (r *Runtime) usesCompatibleChat(spec execution.AttemptSpec) bool {
-	// 转换模式由渠道注册表按最终模型冻结，原生 GPT 不能进入这个分支。
-	// OpenCode 的已知 Chat 模型与 Compatible 共用响应、流式及工具别名转换。
-	// 普通 Compatible 探测维持原行为，新增探测分支只适用于聚合网关。
-	// 探测也要反向构造 Responses，才能通过原有协议校验。
-	provider := r.providerKind(spec)
+	// 仅显式 Compatible 渠道使用 Chat 转换，聚合网关自行处理协议适配。
+	// 路由模式由注册表冻结，不能因模型名称或客户端工具触发隐式降级。
+	// 普通探测保持既有路径，避免对非 Responses 探测错误地重建响应。
 	return spec.RouteMode == execution.RouteConverted &&
-		(provider == channel.ProviderOpenAICompatible || provider == channel.ProviderMultiProtocolGateway) &&
-		(spec.Operation == execution.OperationChatCompletion || spec.Operation == execution.OperationResponsesCreate ||
-			provider == channel.ProviderMultiProtocolGateway && spec.Operation == execution.OperationProbe)
+		r.providerKind(spec) == channel.ProviderOpenAICompatible &&
+		(spec.Operation == execution.OperationChatCompletion || spec.Operation == execution.OperationResponsesCreate)
 }
 
-func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest, execBridge *openCodeExecBridge) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
+func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
 	chat, aliases, err := prepareCompatibleChatRequest(ctx, request)
 	if err != nil {
 		return nil, err
@@ -34,14 +31,6 @@ func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, reques
 	converted := response.ToBifrostResponsesResponse()
 	converted.BackfillParams(request)
 	providerUtils.RestoreResponsesNamespaceToolCalls(aliases, &schemas.BifrostResponse{ResponsesResponse: converted})
-	// 名称恢复后再识别 exec，避免误转换其他 namespace 的同名普通函数。
-	// 模型已被调用；格式错误仍须携带其用量，不能误报为未发送而退掉真实消费。
-	// 没有 bridge 的普通 Compatible 请求保持原响应，custom 恢复仅作用于本次声明。
-	if restoreErr := execBridge.restoreResponse(converted); restoreErr != nil {
-		failure := compatibleStreamError(restoreErr.Error())
-		failure.ExtraFields.BilledUsage = response.Usage
-		return nil, failure
-	}
 	return converted, nil
 }
 
