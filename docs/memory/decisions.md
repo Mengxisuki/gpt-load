@@ -40,3 +40,11 @@
 备选：逐字段删除、在 New API 与 GPT-Load 两层各写兼容规则，或在最终渠道选择后复用现有 Compatible 转换。选择第三项，通过现有模型路由 resolver 为 OpenCode Go/Zen 的 `glm-`、`kimi-`、`deepseek-` 选择转换，其他模型保持原生；普通请求、流式、探测共用模型判断。
 
 代价：GPT 推理选项不能表达为这些目标的等效档位，沿用 Compatible 不转发的合同；只支持可移植的消息/函数工具，旧会话、加密/压缩历史、托管工具及自定义语法显式拒绝。不新增依赖、配置或数据库列。真实网关测试确认日志标注转换模式和实际 Chat 协议；不承诺所有模型家族或客户端。实现和复现见 `README_CN.md`、`internal/execution/bifrost/opencode_presets_test.go`；生产发布与真实厂商验收尚未执行。
+
+## 2026-11-04 01:55:03 +00:00 — 将已知 exec 文法等价包装为 Chat 函数
+
+背景：用户授权实现新请求所需的 custom/grammar 适配。现场 `exec` 文法的 `plain_source` 分支覆盖任意非空字符串，普通 Chat function 可以等价表达；不能只放宽白名单后让 SDK 丢弃工具。
+
+备选：通用 Lark 解析器与任意 custom 桥接、删除工具，或只支持已证明等价的声明。选择最后一种：精确匹配默认 namespace 的 exec 与已知 grammar，以单字段 `input` JSON 包装发送，普通和流式输出严格解包，并转换下一轮调用、结果及工具选择。复用既有 SDK 的命名空间、历史和消费证据链，不引入依赖。补充并限定 2026-11-03 15:26:33 条目中自定义语法的拒绝边界。
+
+代价：流式 exec 源码须在完整参数校验后一次发出，无法逐字符显示生成过程；文法变更或其他 custom 工具继续明确拒绝，需以新样例重新确认合同。无效输出返回错误并保留用量，不生成假的完成态。实现及回归见 `internal/execution/bifrost/opencode_exec.go`、`opencode_exec_test.go`；本地验证通过，未发布，未验证真实模型的工具生成质量。

@@ -346,7 +346,7 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 	// 不把 previous_response_id 当普通字符串删掉后重新开始任务。
 	// 加密推理即使同时存在文字摘要，也不能假装完整迁移。
 	// 压缩记录和厂商内置工具都有独立的上游状态。
-	// 自定义语法工具不是 JSON 函数 schema，转换器没有承诺支持。
+	// 未适配的自定义语法不是 JSON 函数 schema，不能静默忽略。
 	for _, tc := range []struct {
 		name, extra, input string
 		reject             bool
@@ -357,7 +357,8 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 		{name: "custom tool", extra: `,"tools":[{"type":"custom","name":"patch"}]`, input: `"hello"`, reject: true},
 		{name: "hosted tool history", input: `[{"type":"web_search_call","id":"ws_1"}]`, reject: true, historyType: "web_search_call"},
 		// 未实现的历史保留拒绝，但日志须能区分类型，不再只返回同一笼统原因。
-		{name: "custom tool history", input: `[{"type":"custom_tool_call","name":"patch","input":"private-history-marker"}]`, reject: true, historyType: "custom_tool_call"},
+		// custom 现在进入专用适配校验；缺少受支持声明时仍应明确拒绝。
+		{name: "custom tool history", input: `[{"type":"custom_tool_call","name":"patch","input":"private-history-marker"}]`, reject: true},
 		{name: "tool search history", input: `[{"type":"tool_search_output","tools":[]}]`, reject: true, historyType: "tool_search_output"},
 		// 未知 type 也属于不可信输入，诊断不能把它原样写到日志。
 		{name: "unknown history", input: `[{"type":"private-history-marker"}]`, reject: true, historyType: "unknown"},
@@ -414,6 +415,9 @@ func TestOpenCodeResponsesStateAndToolContinuation(t *testing.T) {
 				// 只允许固定类型和数组位置进入诊断，完整正文仍不记录。
 				if tc.historyType != "" && (!strings.Contains(result.Error.Summary, "input[0] type "+tc.historyType) || strings.Contains(result.Error.Summary, "private-history-marker")) {
 					t.Errorf("unsafe or unhelpful history error: %s", result.Error.Summary)
+				}
+				if tc.name == "custom tool history" && result.Error.Summary != "custom history requires a supported exec declaration" {
+					t.Errorf("unexpected undeclared custom history error: %s", result.Error.Summary)
 				}
 			} else if result.Error != nil || calls != 1 || result.StatusCode != 200 {
 				t.Fatalf("tool continuation failed: %+v, calls=%d", result.Error, calls)

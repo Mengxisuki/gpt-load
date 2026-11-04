@@ -27,7 +27,7 @@ func TestCompatibleBestEffortToolConversion(t *testing.T) {
 		body      string
 		wantTools int64
 	}{
-		{"Codex mixed tools", protocol.OpenAIResponses, `{"model":"client-model","input":"hello","store":false,"tool_choice":"auto","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"namespace","name":"helpers","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]},{"type":"web_search"},{"type":"custom","name":"apply_patch","format":{"type":"text"}}]}`, 1},
+		{"Codex mixed tools", protocol.OpenAIResponses, `{"model":"client-model","input":"hello","store":false,"tool_choice":"auto","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}},{"type":"namespace","name":"helpers","tools":[{"type":"function","name":"search","parameters":{"type":"object"}}]},{"type":"web_search"},{"type":"custom","name":"apply_patch","format":{"type":"text"}}]}`, 2},
 		{"Responses selected search", protocol.OpenAIResponses, `{"model":"client-model","input":"hello","store":false,"tools":[{"type":"web_search"}],"tool_choice":{"type":"function","name":"web_search"}}`, 0},
 		{"Claude selected search", protocol.Anthropic, `{"model":"client-model","max_tokens":64,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"web_search_20250305","name":"web_search"}],"tool_choice":{"type":"tool","name":"web_search"}}`, 0},
 	} {
@@ -44,8 +44,11 @@ func TestCompatibleBestEffortToolConversion(t *testing.T) {
 					if r.URL.Path != "/chat/completions" || gjson.GetBytes(body, "tools.#").Int() != test.wantTools {
 						t.Errorf("unexpected SDK fallback wire: path=%s body=%s", r.URL.Path, body)
 					}
-					if test.wantTools == 1 {
-						if gjson.GetBytes(body, "tools.0.function.name").String() != "lookup" || gjson.GetBytes(body, "tool_choice").String() != "auto" {
+					// Chat 可以表达命名空间中的普通函数，不能再沿用旧的静默丢弃预期。
+					// 预期同时保留 lookup 与限定名 search，托管和未知 custom 仍沿用 Compatible 策略。
+					// 直接核对上游实际收到的工具，避免只看准备阶段 schema 导致假通过。
+					if test.wantTools == 2 {
+						if gjson.GetBytes(body, "tools.0.function.name").String() != "lookup" || gjson.GetBytes(body, "tools.1.function.name").String() != "helpers__search" || gjson.GetBytes(body, "tool_choice").String() != "auto" {
 							t.Errorf("function or mode lost: %s", body)
 						}
 					} else if gjson.GetBytes(body, "tool_choice").Exists() {

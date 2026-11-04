@@ -22,7 +22,7 @@ func (r *Runtime) usesCompatibleChat(spec execution.AttemptSpec) bool {
 			provider == channel.ProviderMultiProtocolGateway && spec.Operation == execution.OperationProbe)
 }
 
-func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
+func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest, execBridge *openCodeExecBridge) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
 	chat, aliases, err := prepareCompatibleChatRequest(ctx, request)
 	if err != nil {
 		return nil, err
@@ -34,6 +34,14 @@ func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, reques
 	converted := response.ToBifrostResponsesResponse()
 	converted.BackfillParams(request)
 	providerUtils.RestoreResponsesNamespaceToolCalls(aliases, &schemas.BifrostResponse{ResponsesResponse: converted})
+	// 名称恢复后再识别 exec，避免误转换其他 namespace 的同名普通函数。
+	// 模型已被调用；格式错误仍须携带其用量，不能误报为未发送而退掉真实消费。
+	// 没有 bridge 的普通 Compatible 请求保持原响应，custom 恢复仅作用于本次声明。
+	if restoreErr := execBridge.restoreResponse(converted); restoreErr != nil {
+		failure := compatibleStreamError(restoreErr.Error())
+		failure.ExtraFields.BilledUsage = response.Usage
+		return nil, failure
+	}
 	return converted, nil
 }
 
@@ -41,32 +49,31 @@ func (r *Runtime) compatibleResponsesRequest(ctx *schemas.BifrostContext, reques
 // 该渠道没有 SDK 自动缓存注入或 Anthropic 私有计费头元数据；转换入口恢复后可删除此衔接。
 func prepareCompatibleChatRequest(ctx *schemas.BifrostContext, request *schemas.BifrostResponsesRequest) (*schemas.BifrostChatRequest, map[string]schemas.NamespaceToolAlias, *schemas.BifrostError) {
 	ctx.SetValue(schemas.BifrostContextKeyBaseProviderType, schemas.OpenAI)
-	// 工具 schema 统一由 SDK 的 Chat 调度入口规范化，覆盖解包及提升后的工具。
-	var err *schemas.BifrostError
-	supported := providerUtils.ResponsesNamespaceToolsSupported(ctx, schemas.OpenAI, request.Model)
-	if !supported {
-		request, err = hoistCompatibleAdditionalTools(request)
-		if err != nil {
-			return nil, nil, err
-		}
+	// 此处实际发送 Chat，不能用模型的 Responses 能力判断 namespace 是否可直传。
+	// Chat 不支持容器或动态声明；不先提升、展平会被 ToChatRequest 静默丢弃。
+	// 名称、描述、历史和响应别名继续由 SDK 统一处理，避免另建映射规则。
+	// 该入口只服务转换路线，不能据此修改原生 Responses 的工具格式。
+	request, err := hoistCompatibleAdditionalTools(request)
+	if err != nil {
+		return nil, nil, err
 	}
+	// 默认 functions 解包为裸名字，其他 namespace 使用 SDK 的限定名字。
 	request, err = providerUtils.UnwrapDefaultNamespaceTools(request)
 	if err != nil {
 		return nil, nil, err
 	}
-	if !supported {
-		request, err = providerUtils.FlattenResponsesNamespaceTools(ctx, request)
-		if err != nil {
-			return nil, nil, err
-		}
+	request, err = providerUtils.FlattenResponsesNamespaceTools(ctx, request)
+	if err != nil {
+		return nil, nil, err
 	}
+	// 工具 schema 仍由 SDK 的 Chat 调度入口规范化；这里只修复协议形状。
 	chat := request.ToChatRequest()
 	chat.Input = mergeCompatibleToolTurns(chat.Input)
 	preserveCompatibleToolTurnReasoning(chat.Input)
 	return chat, request.NamespaceToolAliases, nil
 }
 
-// SDK 的同名准备步骤未导出；在能力判断一致时提升 additional_tools，保持请求隔离。
+// SDK 的同名准备步骤未导出；转为 Chat 前提升 additional_tools，保持请求隔离。
 func hoistCompatibleAdditionalTools(request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesRequest, *schemas.BifrostError) {
 	var tools []schemas.ResponsesTool
 	found := false

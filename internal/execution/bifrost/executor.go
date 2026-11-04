@@ -52,6 +52,8 @@ type preparedAttempt struct {
 	secrets            []string
 	// embeddingConversion 记录 OpenAI Embeddings → Gemini 转换回写响应所需的信息。
 	embeddingConversion *geminiembedding.Conversion
+	// execBridge 只在已验证的 OpenCode 自定义工具转换中设置，不影响原生请求。
+	execBridge *openCodeExecBridge
 }
 
 type unarySDKResult struct {

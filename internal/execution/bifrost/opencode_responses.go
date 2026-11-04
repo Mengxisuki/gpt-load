@@ -68,7 +68,9 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 		// 普通消息与函数回合可移植；内置工具执行记录不能伪装成文本历史。
 		// 缺省 type 是 Responses 的简写消息形式，类型校验仍由原解码器负责。
 		switch item.Get("type").String() {
-		case "", "message", "reasoning", "function_call", "function_call_output":
+		case "", "message", "reasoning", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output":
+			// custom 的声明、非空输入和调用关联在 typed DTO 建立后统一验证。
+			// 此处允许解析并不表示接受任意自定义工具。
 		case "additional_tools":
 			// 动态声明不是厂商执行历史，现有 Compatible 会把定义提升到 tools。
 			// 同样校验其中的工具，避免嵌套自定义或托管工具被 SDK 静默丢弃。
@@ -85,7 +87,7 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 			// 未知类型统一命名，避免 type 字段被用来把敏感内容写入日志。
 			kind := "unknown"
 			switch item.Get("type").String() {
-			case "item_reference", "custom_tool_call", "custom_tool_call_output", "tool_search_call", "tool_search_output",
+			case "item_reference", "tool_search_call", "tool_search_output",
 				"web_search_call", "web_fetch_call", "file_search_call", "computer_call", "computer_call_output",
 				"code_interpreter_call", "local_shell_call", "local_shell_call_output", "image_generation_call",
 				"mcp_call", "mcp_list_tools", "mcp_approval_request", "mcp_approval_response", "advisor_call":
@@ -96,14 +98,15 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 		}
 	}
 	// SDK 的通用 Compatible 策略会忽略不支持的工具；新路由不能据此静默失去能力。
-	// 命名空间由现有 SDK 展平并恢复名称，原生托管工具或自定义语法则明确拒绝。
+	// 命名空间由现有 SDK 展平并恢复名称，原生托管工具和未适配的自定义语法明确拒绝。
 	// 只检查工具类型，不复制函数参数 schema 的验证或转换规则。
 	// 顶层和动态声明共享同一检查队列，避免两处能力规则逐渐不一致。
 	for len(tools) > 0 {
 		tool := tools[0]
 		tools = tools[1:]
 		switch tool.Get("type").String() {
-		case "function":
+		case "function", "custom":
+			// custom 仅进入下方 exec 适配校验，未知 grammar 仍在派发前拒绝。
 		case "namespace":
 			tools = append(tools, tool.Get("tools").Array()...)
 		default:
@@ -122,6 +125,13 @@ func (r *Runtime) prepareOpenCodeResponses(spec execution.AttemptSpec, prepared 
 	request, toolErr := hoistCompatibleAdditionalTools(request)
 	if toolErr != nil {
 		failure := notSentUnaryFailure(execution.ErrorKindInvalidRequest, "invalid tools in additional_tools input item")
+		return preparedAttempt{}, &failure
+	}
+	// 先把支持的 exec 变成标准函数，再复用现有工具选择和历史转换。
+	// bridge 跟随本次 attempt，用于响应端恢复 custom 类型与原始输入。
+	request, prepared.execBridge, err = prepareOpenCodeExecBridge(request)
+	if err != nil {
+		failure := notSentConversionFailure(execution.ErrorCodeCriticalSemanticLoss, err.Error())
 		return preparedAttempt{}, &failure
 	}
 	prepared.responsesRequest = request

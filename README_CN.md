@@ -171,14 +171,19 @@ OpenCode Go / OpenCode Zen 渠道中，最终模型名以 `glm-`、`kimi-`、`de
 
 支持普通文本、流式、函数工具以及携带完整消息的后续工具回合。复用 Compatible 的参数规则，不把 GPT 的 `reasoning.context`、推理档位及加密输出偏好转发给这些 Chat 目标；目标使用自身的推理默认行为，不能把 GPT 的 `high` 理解为目标的等效档位。GPT-Load 请求详情会记录转换路由和实际的 `openai-completions` 上游协议。
 
-`additional_tools` 输入项中的函数声明复用已有提升逻辑进入 Chat 的 `tools`，并在工具白名单校验前完成提升；动态声明中的托管、自定义工具仍拒绝。它与 `tool_search_call` / `tool_search_output` 不是同一种历史，不能仅放宽类型检查后丢弃搜索语义。不支持的历史会在服务端错误详情中记录数组位置和已知协议类型，未知类型不回显原值；客户端仍沿用统一转换失败响应。
+`additional_tools` 输入项中的声明复用已有提升逻辑进入 Chat 的 `tools`，并在工具白名单校验前完成提升；动态声明与顶层声明采用相同的支持范围。它与 `tool_search_call` / `tool_search_output` 不是同一种历史，不能仅放宽类型检查后丢弃搜索语义。不支持的历史会在服务端错误详情中记录数组位置和已知协议类型，未知类型不回显原值；客户端仍沿用统一转换失败响应。
 
-不支持任务中途跨厂商迁移：旧响应 ID、会话引用、加密推理、压缩历史会被明确拒绝。厂商托管工具和自定义语法工具也不能静默删除后继续；这类任务应使用能原生支持其能力的模型。函数命名空间复用 SDK 的展平与名称恢复，不新建另一套工具转换器。
+不支持任务中途跨厂商迁移：旧响应 ID、会话引用、加密推理、压缩历史会被明确拒绝。厂商托管工具和未适配的自定义语法工具明确拒绝，需使用能原生支持其能力的模型。Chat 请求中的函数命名空间始终复用 SDK 展平与名称恢复，不能因模型支持 Responses 命名空间而跳过 Chat 所需的转换。
 
-代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器。回归入口：
+已适配默认命名空间（省略或 `functions`）的 `exec` 自定义工具：只接受 `grammar/lark` 且定义与 `internal/execution/bifrost/opencode_exec.go` 中已验证文法一致（仅忽略定义两端空白）。其 `plain_source` 分支允许任意非空文本，因此可等价包装为仅含非空 `input` 字符串的 Chat 函数参数，无需通用 Lark 解析器。普通返回、流式返回及下一轮调用/结果均恢复 custom 合同，保留原文、调用 ID 和命名空间；强制选择与工具白名单同步转换。
+
+流式 `exec` 参数在完整接收并校验后发送一条原文 delta 和 done，普通文本与普通函数继续按原方式流出。额外/重复字段、空输入和损坏 JSON 明确报错，不发送无效源码或成功终态；转换错误仍保留实际已观察到的上游用量。其他 grammar、工具或运行中跨厂商历史迁移不在本次支持范围。
+
+代码入口：`internal/channel/modules/opencode_{go,zen}.go` 按模型选择协议，`internal/execution/bifrost/opencode_responses.go` 校验可移植性并接入已有转换器，`internal/execution/bifrost/opencode_exec.go` 负责上述 custom 工具双向适配。回归入口：
 
 ```bash
 go test ./internal/execution/bifrost -run '^TestOpenCode' -count=1
+go test -race ./internal/execution/bifrost -run '^TestOpenCodeExec' -count=1
 go test ./internal/channel/... ./internal/state/... ./internal/provideradapter/... ./internal/execution/... ./internal/gateway/...
 go build -o /tmp/gpt-load-check .
 ```

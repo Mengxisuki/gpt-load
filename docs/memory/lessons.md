@@ -51,3 +51,22 @@
 独立复现的代码遗漏：`prepareOpenCodeResponses` 将 `additional_tools` 当作不支持的执行历史，但 `compatible.go` 已实现动态声明提升。仅放行还不够，`allowed_tools` 校验发生在旧提升位置之前，会找不到动态函数。修复在原始工具类型校验后、工具选择校验前复用 `hoistCompatibleAdditionalTools`，顶层与动态声明统一校验，保留定义、调用和结果。不放行自定义/托管历史或加密状态；错误补充位置和已知类型，未知值不写日志。
 
 验证：`TestOpenCodeResponsesStateAndToolContinuation` 新增动态函数及白名单用例先失败后通过，核对真实本机 HTTP 请求中的工具 schema、call_id、结果文本；拒绝嵌套不支持的工具并验证诊断脱敏。`go test ./internal/execution/bifrost ./internal/gateway ./internal/channel ./internal/dialect -count=1`、`go vet ./internal/execution/bifrost`、主程序构建通过。未提交、推送、部署或向真实厂商重放请求；原线上请求的具体失败类型仍待补充证据。官方 [Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search) 将搜索调用与搜索结果定义为独立协议项，不能与动态函数声明混同。
+
+
+## 2026-11-04 01:26:35 +00:00 — 新任务也会携带 grammar 自定义工具声明
+
+已验证：新请求的 Caddy 原始正文显示客户端模型为 GPT，经 New API 映射到 Kimi；input 仅含一项 additional_tools 和普通消息，无 previous_response_id、conversation 或加密历史。动态工具声明包含 functions 命名空间的 exec，类型 custom，format.type=grammar、syntax=lark；另有 12 个普通函数工具。线上 GPT-Load 已发布 0d7c0e5b，additional_tools 已通过，随后的工具类型检查因 custom 拒绝，执行记录为 not_sent，客户端最终收到 502。
+
+结论：这次不是缓存、未发布或旧会话，而是当前 Chat 转换仅支持函数工具，无法表达客户端的 grammar 自定义工具。检查覆盖所有声明，不需要真正调用 exec 就会失败。此前“先解决新任务”的实现并没有覆盖此客户端完整工具合同；仅修动态工具声明不足以支持该请求。
+
+后续边界：完整支持需要评估 custom 声明、输入、普通/流式返回及下一轮调用结果的双向适配，并明确 grammar 约束如何保留，不能简单放行后让 SDK 丢弃或删除工具冒充成功。本轮仅确诊，未实现该适配或改生产。Caddy 已按大小轮转，查询时需扫描当前及 gzip 归档并按 request_id 字段精确匹配，不能仅全文搜索：后续聊天正文可能引用旧请求 ID。只提取类型、位置及已知工具名，原始任务与 grammar 正文不进入仓库。
+
+## 2026-11-04 01:55:03 +00:00 — Chat 线协议不能沿用 Responses 的命名空间能力判断
+
+现象：实现已知 exec 适配后，混合默认 custom 与其他 namespace 同名函数的真实 HTTP 测试发现，普通命名空间工具仍被静默丢弃。根因：`prepareCompatibleChatRequest` 根据模型的 Responses 命名空间能力决定是否展平，但随后实际调用 `ToChatRequest`；SDK 默认认为 OpenAI 支持 namespace，而 Chat wire 无法保留容器。
+
+修复：实际 Compatible Chat 发送前始终提升动态工具、解包默认空间、复用 SDK 展平其他空间，回包先恢复名字再识别 custom exec。同步更新旧测试中错误的丢工具预期。`TestOpenCodeExecParallelStream` 证明两个 custom 与一个其他空间的同名普通函数可并行保留，`TestOpenCodeExecMappedGateway` 验证真实入口映射、响应恢复和日志协议。
+
+另一已复现边界：SDK 可将工具结束与用量拆成不同事件，格式错误后立即退出会丢已消费用量。流恢复先停止发布内容，继续读取上游尾部，再带观察到的用量报错；普通响应同样附带消费证据。`TestOpenCodeExecRejectsMalformedOutput` 覆盖损坏参数、重复字段、尾随 JSON 及独立晚到用量尾块，不泄漏源码、不发送 completed。
+
+验证：执行层、网关、渠道、dialect、provideradapter 相关回归及 exec 定向竞态检查通过。本机真实 HTTP 覆盖两轮文本/数组结果、工具选择、顶层/默认空间、原生 GPT 隔离与坏声明零派发。只对已知 grammar 作等价转换，不能泛化任意 custom 工具。上述是本地实现事实，取代前条“尚未实现”的当前状态；线上调用仍待发布后验收。已确认等价的公开工具文法作为协议常量和测试夹具入库，不含实际任务正文。
