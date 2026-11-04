@@ -195,3 +195,9 @@ New API 既有资源测试新增 `TestTokenModelMappingResponsesHotUpdate`：同
 进一步读取与时间/请求匹配的本地 Codex 对话回合 `01a1a5ca-97f9-7a33-ace0-81fcaf29ab0f`：实际可见回复明确表示没有联网搜索工具，回合无搜索工具事件，随后是普通知识回答。因此这个具体样本不是成功搜索的可复用链路。只记录验证结论，不保存用户问题正文、模型推理或无关其他账号任务。
 
 后续排查应优先按 request_id 对齐客户端回合及必要的响应事件；只有 HTTP 200、声明 web_search 或用户要求搜索都不足以验收。不能把独立 Console 搜索接口的 403 当作原推理请求的错误，也不能把它直接判定为某种 Key 权限配置原因；完整搜索适配仍未完成。
+
+## 2026-11-04 10:28:44 +00:00 — 同名 GPT 模型不代表相同的托管搜索能力
+
+New API 的 GPT 搜索编排联调发现 gpt-6-luna 同时存在 Codex 与 OpenCode Go 组。真实请求日志确认：搜索成功落入 Codex，强制 web_search 失败落入 Go，错误提示该模型没有 hosted search。不能靠名称相同或单次成功认定能力一致；搜索后端应使用支持搜索的独占路由/别名。当前仅在 Codex 组的 gpt-6.1-sol 已完成 Kimi、GLM 主模型的真实搜索及下一轮历史验收。未改生产组配置。
+
+Codex 上游另外拒绝 max_tool_calls，New API 不再默认注入；显式客户端约束仍保留并报告兼容错误。平台只限制自动发起 GPT 请求轮数，不承诺供应商内部搜索次数硬上限。正式实现位于 New API，GPT-Load 不新增搜索编排。配置、费用与边界详见[New API 方案](../../../new-api/docs/plans/api-key-model-mapping.md)。

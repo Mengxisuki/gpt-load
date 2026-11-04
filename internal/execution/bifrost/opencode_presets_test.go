@@ -216,7 +216,7 @@ func newOpenCodeManagerForTest(t *testing.T, id channel.ID, baseURL string) (*Ru
 // 两个渠道及原先命中的模型家族均覆盖，GPT 作为隔离对照。
 // 测试不依赖用户账号或外网，所有任务文本与引用都是合成数据。
 // 不校验模型回答质量；这里的验收对象是 Oak 的传输合同。
-// 请求只允许模型别名替换，其他语义变化都应由这个用例暴露。
+// 请求仅允许模型别名及已验证的 context 兼容，其他变化均需暴露。
 // 原生工具无需在本地登记新类型，未知声明也必须送达供应商。
 func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 	// 搜索调用及来源必须保留，不能将其压成普通回答文本。
@@ -227,7 +227,7 @@ func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 	// 逐字比较该段合成 SSE，可检测事件名、输入文本或输出索引被改写。
 	const toolEvents = "event: response.web_search_call.searching\ndata: {\"type\":\"response.web_search_call.searching\",\"item_id\":\"ws_1\",\"output_index\":0}\n\nevent: response.custom_tool_call_input.delta\ndata: {\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ct_1\",\"output_index\":1,\"delta\":\"text(1)\"}\n\n"
 	for _, id := range []channel.ID{channel.OpenCodeGo, channel.OpenCodeZen} {
-		for _, model := range []string{"kimi-k3", "glm-5.3", "deepseek-v4.1-flash", "gpt-6-luna"} {
+		for _, model := range []string{"kimi-k3", "glm-5.3", "deepseek-v4.1-flash", "deepseek-v4-pro", "gpt-6-luna"} {
 			for _, stream := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/stream=%t", id, model, stream), func(t *testing.T) {
 					// 记录真正发出的请求，不能拿本地请求草稿替代网络边界验证。
@@ -251,6 +251,13 @@ func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 						received, readErr = io.ReadAll(r.Body)
 						if readErr != nil {
 							t.Error(readErr)
+							return
+						}
+						// 模拟现场的拒绝条件，防止只比较草稿而漏掉实际发送内容。
+						// DeepSeek 和 GPT 不套用 Kimi/GLM 的参数能力。
+						if (model == "kimi-k3" || model == "glm-5.3") && gjson.GetBytes(received, "reasoning.context").Exists() {
+							w.WriteHeader(http.StatusBadRequest)
+							io.WriteString(w, `{"error":{"message":"reasoning.context: this reasoning option requires a native Responses target"}}`)
 							return
 						}
 						session = r.Header.Get("Session-Id")
@@ -277,7 +284,7 @@ func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 					// 本机 HTTP 上游由真实执行器访问，模型路由没有被 mock。
 					engine, manager, input, sink, _ := newAggregationSearchGateway(t, id, server.URL+"/team-a")
 					input.Groups[0].Models = []state.ModelConfig{{ID: model, Alias: "public"}}
-					// 不添加参数覆盖；只允许既有模型映射改变 model。
+					// 不添加管理员参数覆盖，兼容规则必须随最终目标自动生效。
 					input.Groups[0].Settings = nil
 					if _, err := manager.Publish(input); err != nil {
 						t.Fatal(err)
@@ -292,7 +299,7 @@ func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 						if turn == 1 {
 							history = strings.TrimSuffix(output, "]") + `,{"type":"custom_tool_call_output","call_id":"call_1","output":"synthetic result"}]`
 						}
-						// reasoning.context 曾触发上游错误，此处证明网关不再私自删除它。
+						// 仅已验证不支持的目标去掉 context；完整输入历史仍必须保留。
 						// include 是输出偏好，不能据此删掉工具或把请求改成其他协议。
 						// store=false 保留现有无状态合同，不靠改变存储选项触发上游回退。
 						body := fmt.Sprintf(`{"model":"public","stream":%t,"store":false,"input":%s,"reasoning":{"context":"all_turns","effort":"high"},"include":["reasoning.encrypted_content"],"tools":[{"type":"web_search","external_web_access":true},{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}}]},{"type":"tool_search","execution":"client","parameters":{"type":"object"}}],"tool_choice":"auto"}`, stream, history)
@@ -316,6 +323,11 @@ func TestOpenCodeMappedResponsesNativeTools(t *testing.T) {
 							t.Fatal(err)
 						}
 						want["model"] = model
+						// 这是预期的供应商参数兼容，不改变请求工具或响应协议。
+						// 未知目标继续透传，不能把个别模型的限制推广到所有模型。
+						if model == "kimi-k3" || model == "glm-5.3" {
+							delete(want["reasoning"].(map[string]any), "context")
+						}
 						if !reflect.DeepEqual(got, want) {
 							t.Fatalf("native payload changed: %s", received)
 						}
