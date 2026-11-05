@@ -77,3 +77,11 @@
 选择：仅 Go/Zen 的生成和探测，保留已有非空 x-opencode-session，依次复用 Session-Id / Session_id / Thread-Id / X-Claude-Code-Session-Id，否则使用网关随机生成且不信任客户端覆盖的 RequestID。复制头后写入，普通、流式、探测共用规则；同请求重试不变，独立请求不共用固定值。无法生成 UUID 导致 untracked 时明确失败。已有显式标识不重新按用户加盐，本头不是用户鉴权边界。无会话线索时不保证跨请求缓存；不增加跨请求会话猜测。来源及优先级见 internal/execution/bifrost/opencode_session.go。
 
 已验证四包回归、OpenCode race、vet、build，以及本地新执行器→SSH 回环→线上 GPT-Load→Gemini 的普通与流式合成问候；两种真实请求完成，未修改线上服务/配置，临时隧道已清理。真实测试未重放用户正文，未验证任意工具续轮或供应商缓存命中。待用户要求发布，不能自动 push oak。
+
+## 2026-11-05 08:45:46 +00:00 — 按实测边界兼容 DeepSeek 结果顺序与 OpenCode Python 默认身份
+
+背景：用户授权修复 DeepSeek Pro 的工具结果缺失误报及 Flash 的 403。最小对照已证明 developer 消息插在并行结果之间会导致 OpenCode 误报，直连官方入口也复现；Python 默认 UA 单独触发 1010。备选为要求客户端修改、恢复整套 Chat 转换、删除历史/指令，或只整理已完整配对的结果并使用网关真实身份。
+
+选择最后一项：仅 OpenCode Go 最终目标 deepseek-v4-pro、Responses 创建处理普通 function 的完整连续调用批次，结果稳定保序、developer 消息后置；遇到不完整或重复 ID、其他消息边界保留原样。UA 只替换 Go 生成/探测中未被管理员显式配置的 Python 默认身份。复用既有正文准备、默认 UA、模型映射和凭据封装，无新状态、配置或依赖。
+
+代价：历史顺序有明确且可追溯的变化，但所有指令仍在下一次模型推理前完整呈现；不承诺任意角色或模型的重排语义，不自动扩大到 Zen/其他型号。管理员指定被上游拒绝的 UA 仍保留，其可用性不由兼容规则兜底。本条补充 2026-11-04 05:30:59 的原生转发选择，不恢复 Chat 桥接。网络回归先红后绿，6 次真实合成联调完成；实现尚未发布，详见[诊断记录](../diagnostics/deepseek-tool-history.md)。

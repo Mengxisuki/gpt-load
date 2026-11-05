@@ -119,11 +119,18 @@ func sanitizeNativeRequestBody(spec execution.AttemptSpec, stream bool) ([]byte,
 			return nil, err
 		}
 		changed := stripNativeControlFields(object)
-		// OpenCode 仅归一化已确认不支持的推理选项，原生工具及历史不变。
+		// OpenCode 仅处理已验证的推理选项与完整工具结果的顺序兼容。
 		// 在最终模型确定后处理，普通、流式和探测共用这一个入口。
 		// 此处只改本次解码的副本，后续候选不能继承前一目标的适配结果。
 		// model、计费身份及响应事件仍由现有流程分别处理。
 		normalized, err := normalizeOpenCodeContext(object, spec)
+		if err != nil {
+			return nil, err
+		}
+		changed = changed || normalized
+		// 工具定义和历史项目正文保留，仅在完整批次中后置 developer 消息。
+		// 不在 Chat、compact 或其他协议上猜测相同规则。
+		normalized, err = normalizeOpenCodeToolHistory(object, spec)
 		if err != nil {
 			return nil, err
 		}

@@ -169,13 +169,19 @@ OpenCode Go / OpenCode Zen 渠道的 Responses 请求统一按原生协议转发
 
 New API 的 Key 映射、渠道映射以及 GPT-Load 模型别名继续使用原有链路。GPT-Load 仍负责渠道凭据、安全过滤、模型身份、用量观察和日志；工具声明、`additional_tools`、完整工具历史与 `include` 按原生请求传递。对最终模型为 `kimi-k3`、`glm-5.3` 的 Responses 请求，自动移除上游明确不支持的 `reasoning.context=all_turns`，保留 `effort`、`summary` 及完整输入历史；其他目标和未知 context 值继续透传。搜索来源、引用及自定义工具流事件沿用上游响应，日志记录 `native` 和 `openai-responses`。普通 Chat、Anthropic 和其他供应商渠道保持各自原有协议；通用 OpenAI Compatible 的 Chat 转换及尾块去重仍保留。
 
+OpenCode Go 的 `deepseek-v4-pro` 另有已验证的历史顺序兼容：连续的多个 `function_call` 后，若完整、唯一配对的结果之间插入 developer 消息，会保留结果原顺序并将这些消息移至本批结果之后。图片、文本、调用 ID、指令与扩展字段完整保留。缺失或重复 ID、首份结果前的消息、用户/助手/system/未知项目边界均不重排，保留原请求供上游校验；其他型号及 Zen 不套用此规则。实际整理记录 `opencode.tool_history.normalized` 事件，不记录任务正文。普通和流式共用 `opencode_history.go`。
+
+OpenCode Go 的生成和探测请求会把客户端默认 `Python-urllib/*` UA 替换为真实网关身份 `GPT-Load/<当前版本>`，避免已复现的 403／1010。其他非空 UA、管理员显式配置及其他渠道保持原有优先级；不伪装浏览器，也不新增配置。规则位于既有 `user_agent.go`，只修改本次出站头副本。
+
 本次更新只涉及 GPT-Load，无新增配置、依赖或数据库迁移。继续使用现有 OpenCode 渠道根地址，执行器追加 `/v1/responses`；不要将 Codex 配置中的含 `/v1` 地址直接复制为聚合网关根地址。管理探测也使用 Responses，不再以 Chat 成功推断 Responses 可用。
 
 OpenCode Go / Zen 的普通、流式生成及探测自动补齐 `x-opencode-session`：非空已有值原样保留；缺失时依次复用 `Session-Id`、`Session_id`、`Thread-Id`、`X-Claude-Code-Session-Id`；仍缺失则使用网关生成的请求 UUID。同一次请求的重试保持一致，独立请求分别生成，不依赖共享渠道 Key。没有客户端会话线索时不能保证跨请求的会话缓存；本头不替代用户鉴权。网关无法取得唯一请求身份时明确报错，不发固定兜底值。规则不处理其他渠道和模型列表，不修改正文或响应。
 
-客户端无需知道 OpenCode，也不需要在 New API 参数覆盖里添加该头。请勿配置固定的 `{user_session_id}`：当前 New API 不解析这个占位符，GPT-Load 会按“非空已有值保留”处理它。New API 开启请求体透传时还会跳过参数操作中的 `set_header`；不要把这种配置当作有效会话管理。该自动补头代码本地已通过 Gemini 普通和流式真实联调，部署后才对线上用户生效。
+客户端无需知道 OpenCode，也不需要在 New API 参数覆盖里添加该头。请勿配置固定的 `{user_session_id}`：当前 New API 不解析这个占位符，GPT-Load 会按“非空已有值保留”处理它。New API 开启请求体透传时还会跳过参数操作中的 `set_header`；不要把这种配置当作有效会话管理。自动补头已通过 Gemini 普通和流式真实联调；2026-11-04 线上 a2d8705dd793 已完成原失败 Chat 请求不带会话头的重放验收。
 
 定向回归：`go test ./internal/execution/bifrost -run '^TestOpenCodeSession' -count=1`。可选真实联调 `TestOpenCodeSessionLive` 默认跳过；显式设置 `OAK_SESSION_LIVE_URL`、`OAK_SESSION_LIVE_KEY` 和每次新生成的 `OAK_SESSION_LIVE_REQUEST_ID` 后启用，仅发送合成 Gemini 问候请求，会消耗模型额度。凭据通过环境注入，不写入命令参数、源码或文档。
+
+DeepSeek 定向回归：`go test ./internal/execution/bifrost -run '^TestOpenCode(ToolHistory|PythonUserAgent)' -count=1`。可选 `TestOpenCodeCompatibilityLive` 显式设置 `OAK_HISTORY_LIVE_URL`、`OAK_HISTORY_LIVE_KEY`、独立的 `OAK_HISTORY_LIVE_REQUEST_ID` 才执行；覆盖 Pro 文本/图片工具历史及 Flash Chat 的普通和流式请求。2026-11-05 本地候选执行器经 SSH 回环调用线上 GPT-Load，上述 6 个合成案例全部完成；此验证没有部署候选版本，完整故障与验收证据见[诊断记录](docs/diagnostics/deepseek-tool-history.md)。
 
 上游拒绝参数或不支持工具时，错误仍交给客户端，不删除工具后重试，不改 `store` 触发上游回退。既有无状态存储及资源操作限制不变；这不承诺运行中跨厂商迁移、跨账号复用私有历史或每个模型都完整支持搜索。除上述已验证的 context 兼容外，其他 GPT 参数仍交给上游校验。真实补测确认 DeepSeek V4 Pro 接受 context，因此不能按“非 GPT”统一删除。实际适配会记录 `opencode.reasoning_context.normalized` 事件及请求 ID，不记录正文或凭据。
 

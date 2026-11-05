@@ -208,3 +208,27 @@ Codex 上游另外拒绝 max_tool_calls，New API 不再默认注入；显式客
 用户 Gemini Chat 的 Caddy 入口无会话头；原配置重放仍 502，上游明确报缺 x-opencode-session。只在单次测试中补独立随机值便 200/stop，两层日志均成功。New API 的 set_header 参数操作在请求体透传路径被跳过，且线上不识别 {user_session_id}；配置字面量不能当成动态会话。代码证据是 New API 的 relay/compatible_handler.go 透传分支和 relay/channel/api_request.go 占位符解析；核对时线上版本为 7f22628c28df，未改线上配置。
 
 用户选择 GPT-Load 自动补头。本地实现保留已有标识，无标识则使用网关 RequestID：handler 在入口生成 UUID，拒绝客户端伪造，全部重试复用；熵源失败的 untracked 不能当作会话默认值。新实现只改出站头副本，避免污染其他候选。普通、流式、探测与隔离边界测试及真实 Gemini 普通/流式均通过。不要把任意客户端自行传同名会话时的供应商缓存隔离视为本规则的保证；不要把无会话的独立请求宣称为同一对话自动识别。
+
+## 2026-11-05 07:30:08 +00:00 — 上游提示缺工具结果时必须核对入口配对与多模态历史
+
+现象：请求 `202611050630575069771958268d9d69CsdqLbg` 及随后请求在 06:30:58–06:31:50 UTC 共产生 20 条 DeepSeek V4 Pro 上游 400，均为 `No tool output found for tool call`，指向同一个 exec_command 调用。New API 返回 502；订阅预扣不足后已选钱包，不是最终终止原因。GPT-Load 每条仅一次尝试，不能描述为单条请求在服务端重试 20 次。
+
+已验证：Caddy 入口正文同时含 view_image、exec_command 两个并行 function_call 及各自匹配的 function_call_output。前者结果为 input_image 数组，随后插入 developer 消息，再出现后者的非空字符串结果。因此不能按错误字面认定客户端漏传。New API 渠道 6 为正文透传、Responses 转换 none、无参数覆盖；GPT-Load 组 2 无参数覆盖，执行日志为 native/openai-responses，错误来源 upstream。19 条返回 502 的入口正文规范化哈希一致，另一次入口被客户端取消，但上游仍记录同类 400。
+
+判断与边界：故障定位到 OpenCode Go 对该 Responses 历史的处理；多模态工具结果及 developer 消息打断并行结果的组合是待复现的触发假设，尚不能确定其内部具体分支。GPT-Load 未保存这些请求正文，也没有上游内部日志。本轮没有向供应商重放任务或调用合成模型测试。06:36:50–06:39:26 UTC，同模型新会话及逐轮普通 exec_command 历史共 7 次成功，说明不是模型整体不可用，亦不能证明图片工具历史已修复。
+
+另有 06:32:22、07:03:21 UTC 的 DeepSeek V4.1 Flash Chat 请求返回 403、`error code: 1010`，入口 UA 为 Python-urllib/3.11；这是独立的上游访问拒绝。仅凭该响应不能确认具体风控规则，不能与上述工具历史错误合并归因。证据来自 wdm 的 Caddy 归档、New API 日志及 PostgreSQL logs、GPT-Load SQLite request_logs/request_log_attempts；排查只读，未改线上配置或服务。
+
+## 2026-11-05 07:56:27 +00:00 — 合成对照确认 developer 消息打断结果配对，Flash 1010 由 UA 触发
+
+承接并收敛 07:30:08 条目的待验证假设：用户授权执行测试后，17 次合成请求确认 OpenCode Go 的 DeepSeek V4 Pro 在两个并行工具结果之间遇到 developer 消息时返回第二个结果缺失；同样的文本或图片结果连续排列即可完成。绕过 New API/GPT-Load 直连官方 Responses 入口，普通及流式也复现失败/成功对照，排除本地网关作为必要触发因素。内部函数不可见，不能进一步指定上游具体代码分支。
+
+DeepSeek V4.1 Flash 同正文、同会话仅更换 Python 默认 UA 为应用 UA，即从 403/1010 变为 200/stop；真实命名的 `Oak-Compatibility-Diagnostics/1.0` 也成功。后续合成测试使用明确 UA，不能把此拒绝判作模型能力不足。
+
+首轮合成工具历史漏掉 reasoning_text，连续结果分支触发思考模式独立校验；补齐人工合成 reasoning 项后再跑完整矩阵，避免夹具问题干扰判断。没有重放用户任务或修改生产配置，兼容重排尚未实现。精确案例、关联 ID、可复制的最小正文、修复边界见[验证记录](../diagnostics/deepseek-tool-history.md)。
+
+## 2026-11-05 08:45:46 +00:00 — 候选修复须经真实出站和流式终态验收
+
+承接 07:56:27 的复现结论，用户授权后已在 GPT-Load 本地接入精确历史重排与 Python 默认 UA 替换。正文测试保护完整结果、图片、扩展大整数、指令顺序、多批次、幂等与共享请求隔离；失败或不适用历史保持不变。UA 测试保护管理员覆盖优先级与其他渠道隔离。两类真实 HTTP 模拟回归修复前分别复现 400、403，修复后通过。
+
+候选 runtime 经回环 SSH 调用线上旧 GPT-Load，而后访问真实 OpenCode：Pro 文本与图片历史、Flash Chat 的普通和流式共 6 次成功，每次都从 Python 默认 UA 和原始失败顺序进入候选实现。流式检查 Responses completed 或 Chat DONE，不能只凭 200 验收。此结果证明本地修复有效，不代表生产二进制已更新；未部署或改生产配置。详见[验证记录](../diagnostics/deepseek-tool-history.md)。
