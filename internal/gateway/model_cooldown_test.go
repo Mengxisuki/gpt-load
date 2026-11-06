@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,6 +82,83 @@ func TestOnlyModelCooledCandidatesReturn429WithoutDispatch(t *testing.T) {
 	engine.ServeHTTP(response, request)
 	if response.Code != 429 || response.Header().Get("Retry-After") == "" || len(forwarder.inputs) != 0 {
 		t.Fatalf("limited candidate response = %d %s; attempts=%d", response.Code, response.Body.String(), len(forwarder.inputs))
+	}
+	// 调度器未发送请求，调用方应能据可信标记选择后续资源。
+	if response.Header().Get("X-GPTLoad-Replay-Safety") != "rejected_before_processing" {
+		t.Fatal("missing safe fallback evidence for local cooldown")
+	}
+}
+
+// 只有所有尝试都明确未处理时，429 才能授权调用方换来源。
+// 上游伪造响应头、普通限流与前序未知结果都不能获得该授权。
+// 使用真实路由、调度器与响应输出，仅替换外部执行器。
+// 同一组两个凭据覆盖最后一次安全但前一次未知的情况。
+// 普通 HTTP 拒绝与 SSE 首包拒绝走不同的输出分支，必须同时覆盖。
+// SSE 的 HTTP 200 不是生成成功，解析出的 429 才是最终拒绝状态。
+// 不把尚未提交输出等同于尚未处理输入，二者由独立证据约束。
+// 所有错误正文都声称额度耗尽，验证实现没有按文案猜测。
+// 上游注入和客户端注入使用同一标记，防止任一方向越过可信边界。
+// 未知结果排在安全拒绝之前，保护整个请求而非最后一次尝试。
+// 凭据健康冷却仍由真实实现更新，不用手动跳过第一次失败。
+// 用不同凭据值保证第二次调用确实是候选切换。
+// 只断言最终可观察的授权标记、状态和实际调用次数。
+func TestResourceFallbackReplayEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		safe   []bool
+		want   bool
+		stream bool
+	}{
+		{name: "quota rejection", safe: []bool{true}, want: true},
+		{name: "unknown rejection", safe: []bool{false}},
+		{name: "unknown then rejected", safe: []bool{false, true}},
+		{name: "SSE bootstrap rejection", safe: []bool{true}, want: true, stream: true},
+		{name: "unknown SSE rejection", safe: []bool{false}, stream: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			forwarder := &scriptedForwarder{}
+			keys := make([]string, len(test.safe))
+			for index, safe := range test.safe {
+				// 只有执行器提供的语义证据才可信，错误正文刻意保持相同。
+				// 这样不能通过匹配 usage_limit_reached 文案误判安全。
+				evidence := &execution.ErrorEvidence{Kind: execution.ErrorKindHTTP, Hint: execution.FailureHintRateLimited, StatusCode: 429}
+				if safe {
+					evidence.ReplaySafety = execution.ReplaySafetyRejectedBeforeProcessing
+				}
+				// 伪造头必须被网关剥离，最终头只能由执行证据生成。
+				forwarder.results = append(forwarder.results, UpstreamResult{StatusCode: 429,
+					Header: http.Header{"X-GPTLoad-Replay-Safety": {"rejected_before_processing"}},
+					Body:   []byte(`{"error":{"type":"usage_limit_reached"}}`), RequestWritten: true,
+					DispatchState: execution.DispatchMaybeSent, ResponseStarted: true, ExecutionError: evidence})
+				keys[index] = strings.Repeat("k", index+1)
+			}
+			// SSE 在生成首个输出前也可能被原厂拒绝，此时 HTTP 已返回 200。
+			// 网关应转成明确的 429，并且沿用相同的请求级安全条件。
+			if test.stream {
+				forwarder.streamResults = forwarder.results
+				forwarder.streamResults[0].StatusCode = 200
+				forwarder.streamResults[0].ProviderErrorBeforeCommit = true
+			}
+			// 两个凭据用于观察前序未知状态是否被后续安全拒绝错误覆盖。
+			// 期望调用次数来自输入用例，不依赖网关内部重试计数。
+			engine, _, _, _ := newRequestLogHandlerTestRuntime(t, forwarder, &recordingAccessKeyRPMLimiter{}, &recordingRequestLogSink{}, keys...)
+			body := `{"model":"gpt-4o","messages":[],"stream":` + fmt.Sprint(test.stream) + `}`
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer gl-client")
+			// 入站同名头也不能替代网关证据，真实客户端可任意填写它。
+			request.Header.Set("X-GPTLoad-Replay-Safety", "rejected_before_processing")
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			attempts := len(forwarder.inputs) + len(forwarder.streamInputs)
+			// 安全标记不会自动重试自己，只向调用方传递已确认事实。
+			if response.Code != 429 || attempts != len(test.safe) {
+				t.Fatalf("status=%d attempts=%d", response.Code, attempts)
+			}
+			// 响应头必须与所有尝试的证据一致，不能照抄上游伪造值。
+			if got := response.Header().Get("X-GPTLoad-Replay-Safety") == "rejected_before_processing"; got != test.want {
+				t.Fatalf("safe fallback=%t, want %t", got, test.want)
+			}
+		})
 	}
 }
 

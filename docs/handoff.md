@@ -1,5 +1,13 @@
 # OpenCode 原生 Responses 兼容验收
 
+## 2026-11-05 18:46:51 +00:00 — 挂靠额度顺延修复待配套发布
+
+本轮只读确认 wdm 运行 `oak-255abf88459d-42005704315-1`，New API 运行 `oak-1ea2b201e07c-42083430069-1`。下面旧任务的“未提交/未发布”不能覆盖该实测版本。
+
+已在 `internal/gateway/handler.go` 接入全请求安全拒绝证据及保留头过滤，在既有 `model_cooldown_test.go` 验证冷却零发送、HTTP/SSE、伪造头与前序未知结果；New API 配套识别、错误日志及资金回归已完成。完整证据、命令和发布后验收见 [New API 排障记录](../../new-api/docs/diagnostics/hosting-resource-fallback.md)。相关两包回归、定向 race、vet 及根程序构建通过；无配置、依赖或数据库结构变更。
+
+尚未提交、推送或部署，待用户明确发布授权。获批后核对 diff/暂存区，只提交本任务路径，保护此前未跟踪 `docs/diagnostics/`。先发布 GPT-Load，再发布 New API，验证真实耗尽账号优先时顺延、双服务请求关联及一次结算；不重放用户任务或人为耗尽余额。
+
 ## 最新补充：2026-11-05 08:45:46 +00:00 — DeepSeek 历史与 Python UA 修复已在本地验收
 
 用户授权修复已复现的两类故障。`opencode_history.go` 经 `passthrough.go` 接入原生 Responses，精确限定 OpenCode Go / deepseek-v4-pro；只对完整唯一配对的并行结果后置中间 developer 消息，保留正文与边界。`user_agent.go` 对 Go 生成/探测的客户端 Python 默认 UA 使用网关身份，管理员显式配置优先。没有新增配置、数据库或依赖。

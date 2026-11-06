@@ -232,3 +232,9 @@ DeepSeek V4.1 Flash 同正文、同会话仅更换 Python 默认 UA 为应用 UA
 承接 07:56:27 的复现结论，用户授权后已在 GPT-Load 本地接入精确历史重排与 Python 默认 UA 替换。正文测试保护完整结果、图片、扩展大整数、指令顺序、多批次、幂等与共享请求隔离；失败或不适用历史保持不变。UA 测试保护管理员覆盖优先级与其他渠道隔离。两类真实 HTTP 模拟回归修复前分别复现 400、403，修复后通过。
 
 候选 runtime 经回环 SSH 调用线上旧 GPT-Load，而后访问真实 OpenCode：Pro 文本与图片历史、Flash Chat 的普通和流式共 6 次成功，每次都从 Python 默认 UA 和原始失败顺序进入候选实现。流式检查 Responses completed 或 Chat DONE，不能只凭 200 验收。此结果证明本地修复有效，不代表生产二进制已更新；未部署或改生产配置。详见[验证记录](../diagnostics/deepseek-tool-history.md)。
+
+## 2026-11-05 18:46:51 +00:00 — 可信顺延证据必须覆盖整个请求的所有尝试
+
+wdm 挂靠原厂明确额度拒绝后，模型冷却使后续 429 均为零次发送；New API 缺少可靠证据而终止，且免费拒绝未写请求日志。不能用状态码或最后一次尝试替代整个请求的执行状态。
+
+网关现将安全资格置于请求级：初始尚未发送，每次可能处理且未明确拒绝、或已提交输出时永久撤销。最终未提交的 429 才生成保留头 `X-GPTLoad-Replay-Safety: rejected_before_processing`，原厂和入站同名头不可信。普通/SSE、前序未知后序拒绝、伪造头及冷却零发送测试通过；gateway/CPA 回归、定向 race、vet 和构建通过。New API 配套日志、来源与真实三库矩阵已验证，尚未发布。具体现场 ID 及双服务合同引用 [New API 排障记录](../../../new-api/docs/diagnostics/hosting-resource-fallback.md)，不重复保存原始日志或用户任务正文。

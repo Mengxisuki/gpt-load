@@ -50,6 +50,10 @@ const (
 	// debugHeaderKey remains reserved so an upstream cannot inject it downstream.
 	debugHeaderKey      = "X-GPTLoad-Key"
 	debugHeaderAttempts = "X-GPTLoad-Attempts"
+	// 跨服务顺延证据只能由网关生成，上游同名头必须剥离。
+	replaySafetyHeader = "X-GPTLoad-Replay-Safety"
+	// 请求级状态只会从安全变为未知，不能被最后一次拒绝覆盖。
+	replaySafeContextKey = "gptload.rejected_before_processing"
 )
 
 var debugHeaderNames = []string{
@@ -57,6 +61,7 @@ var debugHeaderNames = []string{
 	debugHeaderKey,
 	debugHeaderAttempts,
 	requestIDHeader,
+	replaySafetyHeader,
 }
 
 var errRequestTooLarge = errors.New("request body is too large")
@@ -925,6 +930,9 @@ func (handler *Handler) executeAttempts(
 ) {
 	stream := originalMetadata.Stream
 	operation := originalMetadata.Operation
+	// 尚未调用执行器时没有重复处理风险，包括全部候选处于额度冷却。
+	// 此状态只适用于本轮执行链，入口鉴权或预算限流不会自动取得证据。
+	ginContext.Set(replaySafeContextKey, true)
 	var redactionCipher encryption.RedactionCipher
 	if !snapshot.RequestRedaction.Empty() || redactionBusinessProtocol(selectedDialect.Protocol()) {
 		var err error
@@ -1484,6 +1492,12 @@ func (handler *Handler) executeAttempts(
 		}
 		releaseGroup()
 		result = normalizeUpstreamResultContract(result)
+		// 任一尝试可能已处理，整个请求都禁止跨来源重放。
+		// 已输出或缺少明确拒绝证据的普通 429、超时同样属于未知。
+		if result.Committed || result.DispatchState != execution.DispatchNotSent &&
+			(result.ExecutionError == nil || result.ExecutionError.ReplaySafety != execution.ReplaySafetyRejectedBeforeProcessing) {
+			ginContext.Set(replaySafeContextKey, false)
+		}
 		if !stream && result.HasResponse() && !result.ProviderErrorBeforeCommit &&
 			result.DispatchState != execution.DispatchLocal &&
 			result.StatusCode >= http.StatusOK && result.StatusCode < http.StatusMultipleChoices {
@@ -1963,6 +1977,11 @@ func (handler *Handler) writeBufferedResponse(
 		for _, value := range values {
 			ginContext.Writer.Header().Add(name, value)
 		}
+	}
+	// 仅未提交的 429 允许调用方按自己的授权顺序选择下一来源。
+	// 普通上游响应头已经剥离，客户端也不能通过入站同名头伪造证据。
+	if status == http.StatusTooManyRequests && ginContext.GetBool(replaySafeContextKey) && !ginContext.Writer.Written() {
+		ginContext.Header(replaySafetyHeader, string(execution.ReplaySafetyRejectedBeforeProcessing))
 	}
 	if err := controlled.writeHeader(status); err != nil {
 		return fmt.Errorf("write downstream response headers: %w", err)
