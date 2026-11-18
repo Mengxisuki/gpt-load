@@ -238,3 +238,21 @@ DeepSeek V4.1 Flash 同正文、同会话仅更换 Python 默认 UA 为应用 UA
 wdm 挂靠原厂明确额度拒绝后，模型冷却使后续 429 均为零次发送；New API 缺少可靠证据而终止，且免费拒绝未写请求日志。不能用状态码或最后一次尝试替代整个请求的执行状态。
 
 网关现将安全资格置于请求级：初始尚未发送，每次可能处理且未明确拒绝、或已提交输出时永久撤销。最终未提交的 429 才生成保留头 `X-GPTLoad-Replay-Safety: rejected_before_processing`，原厂和入站同名头不可信。普通/SSE、前序未知后序拒绝、伪造头及冷却零发送测试通过；gateway/CPA 回归、定向 race、vet 和构建通过。New API 配套日志、来源与真实三库矩阵已验证，尚未发布。具体现场 ID 及双服务合同引用 [New API 排障记录](../../../new-api/docs/diagnostics/hosting-resource-fallback.md)，不重复保存原始日志或用户任务正文。
+
+## 2026-11-06 06:49:33 +00:00 — Flash 的参数拒绝、上游容量与平台无渠道需分别归因
+
+只读核对 wdm：GPT-Load 已运行 `oak-ba2522dcea0c-42154811260-1`，New API 已运行 `oak-34e0fea2777a-42154815652-1`；两服务 active、无自动重启，不能沿用旧交接中的待发布版本判断。06:43:49–06:44:39 UTC 的 30 条 Responses 请求全部返回 New API 502，其中执行层上游 400 共 20 条、503 共 10 条，每条仅一次尝试、failure_origin=upstream。
+
+Caddy 入站元数据与 New API 日志确认：客户端请求 gpt-6.1-terra，Key 映射为 deepseek-v4.1-flash，保留 reasoning.context=all_turns；400 明确为 `reasoning.context: this reasoning option requires a native Responses target`。渠道 6 正文透传且无参数覆盖，GPT-Load 组 2 无覆盖，执行为 native/openai-responses。`internal/execution/bifrost/opencode_parameters.go` 的兼容名单仅含 kimi-k3、glm-5.3；不能把 DeepSeek V4 Pro 已接受 context 的结论用于 Flash。样本 New API ID：`202611060643495920287168268d9d6q73LScrz`；同窗口 GPT-Load ID：`baf96645-6ae7-4353-a4e8-118878e410df`。订阅预扣失败后已选择钱包，日志 resource_source=wallet，因此订阅不足不是该请求终止原因。
+
+独立容量故障：上述 10 条 503 为 `Endpoint is unavailable`；06:40:36–06:42:08 UTC 的 Flash Chat 有 4 条 429，分别为 overloaded 与 prefill_cap_refused，同窗口亦有一次 Chat 成功。移除 context 是否足以恢复 Responses 及完整工具能力尚未做对照验证，不能承诺参数修复解决容量故障。06:44:53、06:45:05 UTC 的网页 `/pg/chat/completions` 503 则是 default 分组下 gpt-6-sol / gpt-6.1-sol 无可用渠道，与执行层上游拒绝分开处理；同期 Codex 挂靠路径有成功请求，不能判断整个 GPT 服务不可用。
+
+本轮仅查询服务、journal、SQLite/PostgreSQL 与 Caddy 请求结构，未重放用户任务、调用合成模型、修改生产配置或重启服务。后续参数修复应先对 Flash 做最小合成对照，再决定是否扩展精确兼容名单；网页问题应核对对应用户分组和渠道模型授权，不凭挂靠成功推断平台渠道存在。
+
+## 2026-11-12 05:19:00 +00:00 — 下游取消可能来自上游透传流的搜索事件错误
+
+wdm 的三个 Claude 搜索失败在 GPT-Load 均为组 #8、凭据 #11、sub2api/native/openai-responses，单次尝试，上游 200 且 committed=true，最终 downstream_cancel/client_canceled。New API 同时记录 `Responses output item changed from tool_use to text`；不能把取消日志当成终端用户主动停止，也不能只看 200 判断成功。部署 `ba2522dcea0c` 的原生透传不改事件类型或索引。
+
+绕过两层网关直接向 Aiwanwu 发出有界原搜索请求，捕获无 item_id 的 function_call_arguments.delta(output_index=0)，随后 message 再使用 output_index=0；New API 同版本公开转换器在第 3 个事件精确复现原错。同一请求走上游原生 Messages 则返回 server_tool_use、含 5 项的 web_search_tool_result、文本与 end_turn，确认搜索存在、上游 Responses 转换存在缺陷。4 次较简单的合成请求仅返回普通工具调用，不能替代原场景验证。
+
+执行 ID、供应商复现 ID、字段级证据和验证边界见 [New API 排障记录](../../../new-api/docs/memory/lessons.md#2026-11-12-051900-0000--受控复现确认-aiwanwu-搜索流转换产生无归属工具增量与索引冲突)。建议优先验收 New API #10 Messages→GPT-Load Anthropic native 的完整原生链；本轮未改配置、业务源码或重启，未把临时捕获和凭据写入仓库。
