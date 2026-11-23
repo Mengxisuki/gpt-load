@@ -374,7 +374,7 @@ func (bridge *codexProviderBridge) ExecuteStream(
 	go func() {
 		defer close(chunks)
 		for chunk := range response.Chunks {
-			converted := providerStreamChunk{Payload: append([]byte(nil), chunk.Payload...), Err: chunk.Err}
+			converted := providerStreamChunk{Payload: append([]byte(nil), chunk.Payload...), Incomplete: chunk.Incomplete, Err: chunk.Err}
 			select {
 			case chunks <- converted:
 			case <-ctx.Done():
@@ -497,9 +497,20 @@ func codexErrorTypeCode(err error) (string, string) {
 	return "", ""
 }
 
+// codexModelCapacityError 区分瞬时容量与账号额度，供现有候选策略使用。
 func codexModelCapacityError(err error) bool {
-	_, code := codexErrorTypeCode(err)
-	if strings.EqualFold(code, "model_at_capacity") || strings.EqualFold(code, "model_is_at_capacity") {
+	// 额度耗尽的类型证据优先于同一响应中可能出现的容量错误码。
+	typeValue, code := codexErrorTypeCode(err)
+	if strings.EqualFold(typeValue, "usage_limit_reached") {
+		return false
+	}
+	// SDK 提供分类时尊重其否定结果，不能再用宽泛消息匹配覆盖。
+	var transient interface{ IsTransientRateLimit() bool }
+	if errors.As(err, &transient) {
+		return transient.IsTransientRateLimit()
+	}
+	if strings.EqualFold(code, "model_at_capacity") || strings.EqualFold(code, "model_is_at_capacity") ||
+		strings.EqualFold(code, "turn_rate_limit_exceeded") {
 		return true
 	}
 	for current := err; current != nil; current = errors.Unwrap(current) {

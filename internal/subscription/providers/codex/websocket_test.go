@@ -54,3 +54,19 @@ func TestWSErrorFromBridgePreservesSafeRateLimitMetadata(t *testing.T) {
 		t.Fatalf("safe WebSocket rate-limit metadata was lost: %+v", failure)
 	}
 }
+
+// 桥接层必须保留 SDK 给出的瞬时容量证据。
+// 该证据允许现有策略区分容量与额度耗尽。
+// 同时保留可能已发送的状态，不自动放宽重放条件。
+// 输入仅含安全分类字段，不依赖上游错误正文。
+// 用真实转换函数验证边界映射，避免手工复制结果自证。
+func TestWSErrorFromBridgePreservesTransientCapacity(t *testing.T) {
+	err := wsErrorFromBridge(&cpaembedded.CodexWSError{
+		Code: "upstream_error", UpstreamType: "rate_limit_error", HTTPStatus: 429,
+		TransientRateLimit: true, DispatchState: WSMaybeSent,
+	})
+	var failure *WSError
+	if !errors.As(err, &failure) || !failure.TransientRateLimit || failure.DispatchState != WSMaybeSent {
+		t.Fatalf("WebSocket capacity evidence was lost: %+v", failure)
+	}
+}

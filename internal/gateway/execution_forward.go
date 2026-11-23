@@ -505,7 +505,8 @@ func (forwarder *ExecutionForwarder) ForwardStream(
 			}
 		}
 	}
-	emptyResponse := !committed && downstreamErr == nil && terminal.Error == nil &&
+	// 已处理但未完成的生成不能按空响应重新发送，以免重复执行或扣费。
+	emptyResponse := !committed && downstreamErr == nil && terminal.Error == nil && !terminal.Incomplete &&
 		ready != nil && ready.StatusCode >= http.StatusOK && ready.StatusCode < http.StatusMultipleChoices &&
 		preread.active() && streamEvents.endedWithoutContent()
 	if !emptyResponse {
@@ -1214,7 +1215,12 @@ func executionStreamObservation(
 		return observeStreamTermination(ctx, downstreamErr, streamEvents)
 	}
 	if terminal.Error == nil {
-		return streamEvents.endObservation()
+		observation := streamEvents.endObservation()
+		// 仅补充协议转换丢失的未完成终态，保留已有断连和取消证据。
+		if terminal.Incomplete && observation.EndReason == StreamEndCleanEOF {
+			return streamTerminalObservation(StreamEndProviderIncomplete)
+		}
+		return observation
 	}
 	switch terminal.Error.Kind {
 	case execution.ErrorKindCanceled:

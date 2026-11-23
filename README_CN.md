@@ -156,6 +156,10 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 | Gemini                  | `/v1beta/models/...`                                               |
 | Gemini Embeddings       | `POST /v1beta/models/{model}:embedContent` / `:batchEmbedContents` |
 
+Codex 订阅分组可通过 `POST /v1/images/generations` 生成图片，通过
+`POST /v1/images/edits` 编辑图片。分组配置可选用 `gpt-image-2.6`、
+`gpt-image-2.6-flare` 或 `gpt-image-2.6-sunburst`，这些模型应通过 Images 接口调用。
+
 ### 内置渠道
 
 - **官方与云平台**：OpenAI、Anthropic、Gemini、xAI、Azure OpenAI、AWS Bedrock、Google Vertex AI

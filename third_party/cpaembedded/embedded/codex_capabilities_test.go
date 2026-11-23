@@ -61,6 +61,8 @@ func TestCodexCapabilityPreservesUpdatesAcrossTurns(t *testing.T) {
 		}
 		raw, _ := json.Marshal(body)
 		result, e := session.ExecuteTurn(t.Context(), raw, nil)
+		// 调用者归还或清空请求缓冲后，结果与下一轮继承档位仍须有效。
+		clear(raw)
 		if e != nil {
 			t.Fatal(e)
 		}

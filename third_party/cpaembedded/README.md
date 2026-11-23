@@ -41,8 +41,8 @@ the existing HTTP executor remains separate.
 ## Codex request identity
 
 Codex HTTP inference (including streaming and images) and WebSocket handshakes
-use a pinned `codex-tui/0.159.2` User-Agent with CPA's existing platform signature.
-`Version` is fixed to `CodexClientVersion`, currently `0.159.2`. Downstream and GPT-Load group
+use a pinned `codex-tui/0.169.1` User-Agent with CPA's existing platform signature.
+`Version` is fixed to `CodexClientVersion`, currently `0.169.1`. Downstream and GPT-Load group
 header rules cannot override, clear, or remove these two identity headers.
 This restriction applies only to Codex; other providers retain their header rules.
 HTTP continues to honor explicit `Originator` rules, including empty values and
@@ -50,9 +50,9 @@ removal. WebSocket retains the fixed `codex-tui` originator.
 
 Model and account observation requests use the same version for their User-Agent,
 Version header, and models `client_version` query parameter. The embedded model
-JSON is copied from OpenAI Codex `rust-v0.159.2`,
+JSON is copied from OpenAI Codex `rust-v0.169.1`,
 `codex-rs/models-manager/models.json`, with its SHA-256 checked by tests.
-CPA `v8.0.8`, the Codex identity, and this model snapshot form one tested version set.
+当前兼容组合为 CPA `v8.0.77`、Codex `0.169.1` 和对应模型快照；本地回归不代表真实账号推理验收。
 The bridge pins execution identity because CPA's built-in UA still uses an older version.
 HTTP, image, WebSocket, and observation tests check these outgoing values.
 
@@ -151,7 +151,7 @@ sent only in the first. `CPA_LIVE_CODEX_WS_PROXY_URL` defaults to `direct`;
 ## Grok request identity
 
 `grokClientVersion` is the single identity pin for execution, model discovery, and
-billing, currently `1.0.44` with CPA `v8.0.8`. Each path retains its own User-Agent
+billing, currently `1.0.88` with CPA `v8.0.77`. Each path retains its own User-Agent
 format. CPA's version constant is not exported, and its default CLI identity only
 applies to the official chat-proxy endpoint; the bridge therefore keeps its
 explicit headers for custom upstreams too. Upgrading CPA does not replace this pin.
@@ -164,10 +164,10 @@ validation; Grok has no CLI-version-bound model template snapshot to update.
 ## Pinned upstream
 
 - Module: `github.com/router-for-me/CLIProxyAPI/v8`
-- Version: `v8.0.8`
+- Version: `v8.0.77`
 
 The bridge keeps Codex's fixed Version, execution and observation identity, and
-model snapshot aligned at `0.159.2`. CPA includes Antigravity reasoning tokens in unary
+model snapshot aligned at `0.169.1`. CPA includes Antigravity reasoning tokens in unary
 OpenAI Chat and OpenAI Responses output totals; the bridge only adds them for OpenAI
 Chat streaming, and retains Anthropic's unary cache-input normalization.
 Antigravity Responses web search is not enabled by this dependency update.
@@ -180,6 +180,21 @@ The official Codex snapshot includes GPT-6.1 Sol's native client capabilities.
 The root module consumes this bridge through a local `replace`; releases still
 resolve CPA itself at the exact version recorded in both `go.mod` files and
 `go.sum` files.
+
+## CPA v8.0.77 适配边界
+
+根模块与本嵌入模块统一依赖 CPA `v8.0.77`，Codex 客户端契约保持 `0.169.1`。
+Claude、Grok、Antigravity 的固定身份分别为 `2.1.327`、`1.0.88`、`2.29.0`，
+Claude 浏览器授权使用 SDK 提供的 base64url state 生成器。
+
+SDK 返回的推理档位可能引用请求体内存；HTTP 清理请求体及 WebSocket 跨轮次保存前必须复制。
+Codex 的 `Incomplete` 标记经嵌入层、订阅桥接和执行器传到网关，保留用量并记录未完成，
+不能当成空响应触发重试。瞬时容量限制沿用候选不可用策略，明确额度耗尽优先，
+WebSocket 不因容量分类而放宽重放条件。账号选择、重试和健康管理仍由 GPT-Load 负责。
+
+验证入口：本模块执行 `go test -count=1 ./...`；仓库根目录执行
+`go test -count=1 -timeout=15m . ./internal/...`、`go vet ./...` 和 `go build ./...`。
+真实账号验证需另行执行下述 live 测试；本地回归不会证明账号具有 GPT-6.2 权限。
 
 ## Updating CPA
 
@@ -258,7 +273,7 @@ CPA_LIVE_GROK_MODEL=optional-grok-model-id \
 ## Shared Codex capabilities
 
 `modelcatalog/codex.json` contains the union of Codex records from
-`router-for-me/models` commit `690c37fdbe62dc05f609f3a3e609d07ea4d16bf1`.
+`router-for-me/models` commit `829b3b7f5cb34ca0c568d753e481ae0e054b206b`.
 Records are selected in pro, plus, team, free order, keeping the first record
 for each ID, as execution previously used the pro catalog. This describes
 capabilities, not account model availability. Actual model discovery still
@@ -271,7 +286,7 @@ that template, including `ultra`, instead of the narrower CPA snapshot list.
 Models absent from the official template keep their CPA level metadata. The raw
 CPA snapshot stays unchanged and retains its original provenance and digest.
 Unknown models and virtual fallback models do not advertise effort updates.
-Client templates remain pinned to Codex 0.159.2, with CPA v8.0.8; verify all
+Client templates remain pinned to Codex 0.169.1, with CPA v8.0.77; verify all
 version pins and both model snapshots together when updating this set.
 
 HTTP and WebSocket preserve supported `configuration_update` items. WebSocket

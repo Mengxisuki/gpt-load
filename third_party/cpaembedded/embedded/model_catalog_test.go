@@ -56,6 +56,21 @@ func TestMergeModelCatalogKeepsAntigravityExcludedModelsOut(t *testing.T) {
 	}
 }
 
+// 验证订阅模型发现会补齐 Images 2.6，即使账号返回的模型列表只含文本模型。
+// 这是管理端选择分组模型的来源，覆盖执行器可用但界面无法登记的回归。
+func TestMergeModelCatalogIncludesCodexImage26Models(t *testing.T) {
+	t.Parallel()
+	// 只给文本模型作为输入，确保发现结果来自 CPA 的内置 Images 模型。
+	got := MergeModelCatalog(ProviderCodex, []string{"gpt-6.2-sol"})
+	// 同时核对基础名和两种变体，确保发现结果与原生执行支持的模型一致。
+	// 逐个报告遗漏，便于发现 SDK 升级只丢失其中一个变体的情况。
+	for _, id := range []string{"gpt-image-2.6", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		if !containsModelID(got, id) {
+			t.Errorf("Codex 订阅模型列表缺少 %q", id)
+		}
+	}
+}
+
 func containsModelID(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

@@ -214,7 +214,8 @@ func TestCodexGatewayRecoversHistoryRejectedAfterBootstrap(t *testing.T) {
 	}
 }
 
-func newCodexBootstrapGateway(t *testing.T, baseURL string, rules []health.ErrorRule) (*gin.Engine, *searchRequestLogSink) {
+// newCodexBootstrapGateway 为两个订阅分组装配相同的测试模型和完整网关入口。
+func newCodexBootstrapGateway(t *testing.T, baseURL string, rules []health.ErrorRule, additionalModels ...string) (*gin.Engine, *searchRequestLogSink) {
 	t.Helper()
 	adapter, db, registry, keyService, first := newAdapterFixture(t, credentialJSON("access-1", "refresh-1", time.Now().Add(time.Hour)))
 	params, err := json.Marshal(map[string]string{"base_url": baseURL})
@@ -228,6 +229,11 @@ func newCodexBootstrapGateway(t *testing.T, baseURL string, rules []health.Error
 	}
 	if rules != nil {
 		input.SystemSettings[state.SettingErrorRules] = rules
+	}
+	// 保留现有文本用例的基础模型，生图用例通过真实分组模型配置参与调度。
+	modelsForGroup := []state.ModelConfig{{ID: "gpt-5"}}
+	for _, id := range additionalModels {
+		modelsForGroup = append(modelsForGroup, state.ModelConfig{ID: id})
 	}
 	var entries []state.CredentialEntry
 	for index := 0; index < 2; index++ {
@@ -250,7 +256,7 @@ func newCodexBootstrapGateway(t *testing.T, baseURL string, rules []health.Error
 		generation := stateloader.CredentialIdentityGeneration(row.IdentityFingerprint, "codex", "subscription", json.RawMessage(`{}`))
 		input.Groups = append(input.Groups, state.GroupConfig{ID: row.GroupID, Name: fmt.Sprintf("codex-%d", index), ChannelID: channel.Codex,
 			Priority: int32(100 - index*100), ConnectionType: "subscription", Params: params,
-			Models: []state.ModelConfig{{ID: "gpt-5"}}, Enabled: true})
+			Models: modelsForGroup, Enabled: true})
 		input.Credentials = append(input.Credentials, state.CredentialConfig{ID: row.ID, GroupID: row.GroupID, Version: row.SecretVersion, IdentityGeneration: generation, Fingerprint: row.Fingerprint, Status: state.CredentialStatusActive})
 		entries = append(entries, state.CredentialEntry{ID: row.ID, GroupID: row.GroupID, Version: row.SecretVersion, IdentityGeneration: generation, Fingerprint: row.Fingerprint, Status: state.CredentialStatusActive, EncryptedValue: row.Data})
 	}
@@ -262,8 +268,9 @@ func newCodexBootstrapGateway(t *testing.T, baseURL string, rules []health.Error
 		t.Fatal(err)
 	}
 	sink := &searchRequestLogSink{}
+	// Images 使用独立协议解析和流式终态规则，与生产网关注册一致。
 	handler := gateway.NewHandler(manager, registry, keyService, gateway.NewExecutionForwarder(contextTransportCPAExecutor{adapter}),
-		dialect.NewSet(dialect.NewOpenAIResponses()), health.NewStatsStore(), health.NewMutationCoordinator(), nil, sink, nil)
+		dialect.NewSet(dialect.NewOpenAIResponses(), dialect.NewOpenAI(), dialect.NewOpenAIImages(), dialect.NewAnthropic(), dialect.NewGemini()), health.NewStatsStore(), health.NewMutationCoordinator(), nil, sink, nil)
 	engine := gin.New()
 	routes, err := httproute.NewRegistry(handler.HTTPModule())
 	if err != nil {

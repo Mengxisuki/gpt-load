@@ -13,6 +13,43 @@ import (
 	"gpt-load/internal/execution"
 )
 
+// 上游未完成也可能没有文本，不能沿用空响应的重试逻辑。
+// 此例故意只提供终止帧，覆盖最容易误判的零输出边界。
+// 执行器已发送请求，不能以空正文推断它尚未处理。
+// 独立终态标记应优先于转换后看起来正常的 stop。
+func TestIncompleteExecutionIsNotRetriedAsEmptyResponse(t *testing.T) {
+	// 下游协议不包含原始 response.incomplete 字段。
+	const wire = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+	executor := fakeExecutionExecutor{stream: func(_ context.Context, _ execution.AttemptSpec, sink execution.StreamSink) execution.StreamResult {
+		header := http.Header{"Content-Type": {"text/event-stream"}}
+		for _, event := range []execution.StreamEvent{
+			{Sequence: 1, Kind: execution.StreamEventReady, StatusCode: http.StatusOK, Header: header},
+			{Sequence: 2, Kind: execution.StreamEventData, Data: []byte(wire)},
+		} {
+			if err := sink(event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// 模拟执行器返回已处理但未完成的结果。
+		// 该标记必须穿过预读和提交逻辑。
+		return execution.StreamResult{
+			DispatchState: execution.DispatchMaybeSent, ResponseStarted: true,
+			StatusCode: http.StatusOK, Header: header, Incomplete: true,
+		}
+	}}
+	input := executionForwardInput()
+	// 显式开启空响应重试，证明安全性不依赖关闭该功能。
+	input.EmptyResponseRetry = true
+	recorder := httptest.NewRecorder()
+	result := NewExecutionForwarder(executor).ForwardStream(t.Context(), input, recorder)
+	// 保留原始响应，供客户端自行处理内容不足。
+	// 只将日志终态标为未完成，不伪造上游错误。
+	// 已提交与不可空回重试两个断言共同限制后续顺延。
+	if result.EmptyResponseBeforeCommit || !result.Committed || result.Stream.EndReason != StreamEndProviderIncomplete || recorder.Body.String() != wire {
+		t.Fatalf("committed=%v empty=%v end=%v body=%q", result.Committed, result.EmptyResponseBeforeCommit, result.Stream.EndReason, recorder.Body.String())
+	}
+}
+
 // TestEmptyResponsePrereadLimits 固定预读窗口的三重上限。事件数是主判据，
 // 时间与字节数兜底：任一耗尽都必须立即提交，不能无限压住响应。
 func TestEmptyResponsePrereadLimits(t *testing.T) {

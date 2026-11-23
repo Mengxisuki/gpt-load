@@ -188,8 +188,9 @@ type ExecuteStreamResponse struct {
 }
 
 type ExecuteStreamChunk struct {
-	Payload []byte
-	Err     error
+	Payload    []byte
+	Incomplete bool
+	Err        error
 }
 
 // BeginCodexBrowserAuthorization creates one browser OAuth challenge without
@@ -540,7 +541,7 @@ func (e *CodexHTTPExecutor) ExecuteStreamCanonical(ctx context.Context, credenti
 		defer close(chunks)
 		for chunk := range response.Chunks {
 			select {
-			case chunks <- ExecuteStreamChunk{Payload: append([]byte(nil), chunk.Payload...), Err: chunk.Err}:
+			case chunks <- ExecuteStreamChunk{Payload: append([]byte(nil), chunk.Payload...), Incomplete: chunk.Incomplete, Err: chunk.Err}:
 			case <-ctx.Done():
 				return
 			}
@@ -915,6 +916,8 @@ func (o *executionObservation) observe(request *http.Request) {
 		return
 	}
 	effort := thinking.ExtractTranslatedReasoningEffort(body, o.provider)
+	// CPA 的零拷贝解析结果可能引用 body，清理请求体前保留独立副本。
+	effort = strings.Clone(effort)
 	mode, budget := extractReasoningDetails(body, o.provider)
 	clear(body)
 	if effort == "" && mode == "" && budget == nil {
