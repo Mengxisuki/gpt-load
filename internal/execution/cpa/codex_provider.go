@@ -70,6 +70,12 @@ func (*codexProviderBridge) ValidateRouteCapability(route channel.RouteDescripto
 			route.Operation == execution.OperationResponsesInputTokens ||
 			route.Operation == execution.OperationWebSearch) &&
 		route.RouteMode == execution.RouteNative
+	// 渠道的模型路由解析器只为受支持的生图模型选择该转换。
+	// 输入校验在发出原生 Images 请求前完成，普通 Responses 保持原生。
+	if route.ClientProtocol == protocol.OpenAIResponses && route.Operation == execution.OperationResponsesCreate &&
+		route.RouteMode == execution.RouteConverted {
+		valid = true
+	}
 	if route.ClientProtocol == protocol.CodexLive {
 		valid = route.Operation == execution.OperationLiveCall && route.RouteMode == execution.RouteNative
 	}

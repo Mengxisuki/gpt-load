@@ -158,7 +158,17 @@ Codex、Claude、Antigravity 的 OAuth 客户端使用固定回调端口。Compo
 
 Codex 订阅分组可通过 `POST /v1/images/generations` 生成图片，通过
 `POST /v1/images/edits` 编辑图片。分组配置可选用 `gpt-image-2.6`、
-`gpt-image-2.6-flare` 或 `gpt-image-2.6-sunburst`，这些模型应通过 Images 接口调用。
+`gpt-image-2.6-flare` 或 `gpt-image-2.6-sunburst`。
+
+客户端也可以通过 `POST /v1/responses` 对 Codex 订阅的 Sunburst 执行单轮文本生图。
+示例正文为 `{"model":"gpt-image-2.6-sunburst","input":"画一只坐在窗边的橘猫","stream":true,"store":false}`。
+也支持一条用户消息及其 `input_text` 片段。GPT-Load 按 Images 生成并返回 Responses
+JSON 或 SSE，最终图片位于 `image_generation_call.result`。上游返回的用量随响应下发。
+
+此适配是无状态生成，仅接受文本提示及 `size`、`quality`、`output_format`、
+`partial_images` 图片参数。可以携带 Responses 的 `reasoning` 对象，生图时不使用其中的推理配置。
+会话续接、工具调用、参考图不适用此转换。图片编辑使用 `POST /v1/images/edits`。
+转换后的流式事件沿用 Responses 单事件 10 MiB 限制，大图可直接使用 Images 接口。
 
 ### 内置渠道
 

@@ -180,6 +180,8 @@ func TestCompilerValidatesExplicitResponsesStoreHandling(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			module := findModule(t, builtInModules(), Codex)
+			// 用例用静态路由覆盖真实 Codex 声明，所以也移除被替换路由的模型解析器。
+			module.Extensions.RouteResolvers = nil
 			module.Definition.Routes = []spec.Route{{
 				ClientProtocol:         test.clientProtocol,
 				Operation:              test.operation,

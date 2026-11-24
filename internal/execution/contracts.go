@@ -392,6 +392,8 @@ const (
 	ErrorCodeCriticalSemanticLoss         = "critical_semantic_loss"
 	ErrorCodeTargetConversionNotSupported = "target_conversion_not_supported"
 	ErrorCodeTargetSerializationFailed    = "target_serialization_failed"
+	// 转换在派发生图前拒绝无法表示的 Responses 输入。
+	ErrorCodeCodexImageConversionInput = "codex_image_conversion_input_unsupported"
 )
 
 // Valid reports whether the error kind is recognized.

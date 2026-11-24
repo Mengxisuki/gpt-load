@@ -1931,6 +1931,11 @@ func transportReason(result UpstreamResult) reason {
 		return reasonProtocolConversionUnsupported
 	case result.DispatchState == execution.DispatchNotSent && result.ExecutionError != nil &&
 		result.ExecutionError.Kind == execution.ErrorKindInvalidRequest:
+		// 使用固定提示说明生图转换的输入约束，避免回显客户端的提示词及会话引用。
+		if result.ExecutionError.Code == execution.ErrorCodeCodexImageConversionInput {
+			return reason{Status: http.StatusBadRequest, Code: execution.ErrorCodeCodexImageConversionInput,
+				Message: "Codex image generation through Responses requires a single text prompt with no history, files, or tools."}
+		}
 		return reasonInvalidProtocolRequest
 	case errors.Is(result.Err, ErrUpstreamProtocol):
 		return reasonUpstreamProtocol

@@ -7,15 +7,21 @@ import (
 )
 
 const (
-	CodexSubscriptionDriver spec.SubscriptionDriverID = "codex"
-	CodexModelDiscovery     spec.UtilityID            = "codex_models"
-	CodexQuotaObservation   spec.UtilityID            = "codex_quota"
-	CodexResetCreditAction  spec.ActionID             = "codex_reset_credit"
-	CodexDefaultBaseURL                               = "https://chatgpt.com"
+	CodexSubscriptionDriver     spec.SubscriptionDriverID = "codex"
+	CodexModelDiscovery         spec.UtilityID            = "codex_models"
+	CodexQuotaObservation       spec.UtilityID            = "codex_quota"
+	CodexResetCreditAction      spec.ActionID             = "codex_reset_credit"
+	CodexDefaultBaseURL                                   = "https://chatgpt.com"
+	codexResponsesRouteResolver spec.RouteResolverID      = "codex_responses_model"
 )
 
 // Codex declares the subscription-backed Codex channel and its supported routes.
 func Codex() spec.Module {
+	// 在选定实际模型后区分原生文本接口和需要改走 Images 的纯生图模型。
+	// 保留无状态语义，转换产生的 Responses ID 不能在订阅上游续接。
+	responses := spec.NewResponsesCreateRoute(execution.RouteNative, spec.ResponsesStoreHandlingStateless)
+	responses.Resolver = codexResponsesRouteResolver
+	responses.PossibleModes = []execution.RouteMode{execution.RouteNative, execution.RouteConverted}
 	return spec.Module{
 		Definition: spec.Definition{
 			ResponsesWebsocket: execution.WebsocketCapabilities{Native: true, Continuation: true, Prewarm: true, StoredResponses: false, Multiplex: false},
@@ -49,7 +55,7 @@ func Codex() spec.Module {
 				spec.NewRoute(protocol.OpenAICompletions, execution.OperationChatCompletion, execution.RouteConverted),
 				spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesGenerate, execution.RouteNative),
 				spec.NewRoute(protocol.OpenAIImages, execution.OperationImagesEdit, execution.RouteNative),
-				spec.NewResponsesCreateRoute(execution.RouteNative, spec.ResponsesStoreHandlingStateless),
+				responses,
 				spec.NewRoute(protocol.OpenAIResponses, execution.OperationResponsesInputTokens, execution.RouteNative),
 				spec.NewRoute(protocol.OpenAIResponses, execution.OperationWebSearch, execution.RouteNative),
 				spec.NewRoute(protocol.Anthropic, execution.OperationChatCompletion, execution.RouteConverted),
@@ -64,5 +70,18 @@ func Codex() spec.Module {
 				ResetCreditAction:  CodexResetCreditAction,
 			},
 		},
+		Extensions: spec.Extensions{RouteResolvers: map[spec.RouteResolverID]spec.RouteResolver{
+			codexResponsesRouteResolver: resolveCodexResponsesRoute,
+		}},
 	}
+}
+
+// 仅已验证的 Sunburst 模型使用本次 Responses 生图适配。
+// 使用上游模型 ID，确保配置了公开别名的同一模型也走正确的执行路径。
+// 其他模型继续使用该渠道声明的默认路由。
+func resolveCodexResponsesRoute(model string, defaultMode execution.RouteMode) execution.RouteMode {
+	if model == "gpt-image-2.6-sunburst" {
+		return execution.RouteConverted
+	}
+	return defaultMode
 }

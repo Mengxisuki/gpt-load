@@ -23,6 +23,7 @@ import (
 	"gpt-load/internal/execution"
 	"gpt-load/internal/execution/responsealias"
 	"gpt-load/internal/execution/responsemodel"
+	platformheader "gpt-load/internal/platform/httpheader"
 	platformredact "gpt-load/internal/platform/redact"
 	"gpt-load/internal/protocol"
 	"gpt-load/internal/reasoning"
@@ -135,14 +136,9 @@ func (a *Adapter) Execute(ctx context.Context, spec execution.AttemptSpec) (resu
 			Proxy: spec.Proxy, Fingerprint: spec.ProxyFingerprint,
 		})
 	}
-	request, err := bridgeRequest(spec, proxySettings, baseURL, false)
+	request, err := bridgeRequest(spec, provider.ProviderKind(), proxySettings, baseURL, false)
 	if err != nil {
-		return unaryNotSent(
-			execution.ErrorKindInvalidRequest,
-			"subscription request input is not supported",
-			"unsupported_subscription_input",
-			err,
-		)
+		return execution.AttemptResult{DispatchState: execution.DispatchNotSent, Error: requestValidationEvidence(err)}
 	}
 	if validator, ok := provider.(providerRequestValidator); ok {
 		if err := validator.ValidateRequest(request); err != nil {
@@ -215,6 +211,11 @@ func (a *Adapter) Execute(ctx context.Context, spec execution.AttemptSpec) (resu
 		)
 		a.recordPassiveQuotaObservation(spec, response.QuotaObservedAt, response.QuotaWindows, response.Credits)
 	}
+	// 选中的转换路由确实派发 Images，异常时也用该协议决定能否重放。
+	responsesImage := spec.ClientProtocol == protocol.OpenAIResponses && request.Format == "openai-image"
+	if responsesImage {
+		response.UpstreamProtocol = protocol.OpenAIImages
+	}
 	if err != nil {
 		result := unaryExecutionError(execCtx, provider, err, credential)
 		if spec.Operation == execution.OperationWebSearch && response.StatusCode != 0 && !result.ResponseStarted {
@@ -243,7 +244,28 @@ func (a *Adapter) Execute(ctx context.Context, spec execution.AttemptSpec) (resu
 		result.AppliedReasoning = appliedReasoning(response.AppliedReasoningEffort, response.AppliedReasoningMode, response.AppliedReasoningBudgetTokens)
 		return result
 	}
-	return unaryProviderSuccess(provider, spec, response)
+	if responsesImage {
+		response.Payload, err = convertCodexResponsesImageResponse(response.Payload, spec.UpstreamModel)
+		if err != nil {
+			// HTTP 已返回成功但结果无法表示，生图可能发生，必须阻止回退重放。
+			headers := subscriptionResponseHeaders(response.Headers, "application/json")
+			return execution.AttemptResult{
+				DispatchState: execution.DispatchMaybeSent, ResponseStarted: true, StatusCode: http.StatusOK,
+				Header: headers, UpstreamRequestID: upstreamRequestID(headers), UpstreamProtocol: protocol.OpenAIImages,
+				Error: &execution.ErrorEvidence{
+					Kind: execution.ErrorKindProvider, OriginHint: execution.ErrorOriginUpstream,
+					ScopeHint: execution.ErrorScopeRequest, StatusCode: http.StatusOK,
+					Code: "invalid_upstream_image_response", Summary: err.Error(), ReplaySafety: execution.ReplaySafetyUnknown,
+				},
+			}
+		}
+	}
+	result = unaryProviderSuccess(provider, spec, response)
+	if responsesImage {
+		// 合成的 Responses model 用于兼容客户端，不能当作上游报告的模型。
+		result.Model = ""
+	}
+	return result
 }
 
 func unaryProviderSuccess(
@@ -326,13 +348,9 @@ func (a *Adapter) ExecuteStream(
 			Proxy: spec.Proxy, Fingerprint: spec.ProxyFingerprint,
 		})
 	}
-	request, err := bridgeRequest(spec, proxySettings, baseURL, true)
+	request, err := bridgeRequest(spec, provider.ProviderKind(), proxySettings, baseURL, true)
 	if err != nil {
-		return streamNotSent(
-			execution.ErrorKindInvalidRequest,
-			"subscription request input is not supported",
-			"unsupported_subscription_input",
-		)
+		return execution.StreamResult{DispatchState: execution.DispatchNotSent, Error: requestValidationEvidence(err)}
 	}
 	if validator, ok := provider.(providerRequestValidator); ok {
 		if err := validator.ValidateRequest(request); err != nil {
@@ -367,6 +385,17 @@ func (a *Adapter) ExecuteStream(
 		upstreamProtocol = effectiveUpstreamProtocol(provider, response.UpstreamProtocol)
 		a.recordPassiveQuotaObservation(spec, response.QuotaObservedAt, response.QuotaWindows, response.Credits)
 	}
+	// 即使上游拒绝后未提供响应体，尝试实际使用的仍是原生 Images 协议。
+	responsesImage := spec.ClientProtocol == protocol.OpenAIResponses && request.Format == "openai-image"
+	if responsesImage {
+		upstreamProtocol = protocol.OpenAIImages
+		// 转换后的生图没有文本 Responses 前导，不能用该前导规则推断上游未处理。
+		// 仍由原始错误明确证明认证或配额拒绝，才允许按 Images 规则顺延。
+		var bootstrap *codexBootstrapRejectionError
+		if errors.As(err, &bootstrap) {
+			err = bootstrap.cause
+		}
+	}
 	if err != nil {
 		result := unaryExecutionError(streamCtx, provider, err, credential)
 		if response != nil && result.ResponseStarted {
@@ -395,7 +424,12 @@ func (a *Adapter) ExecuteStream(
 	incomplete := false
 	var nativeResponsesAssembler *nativeResponsesSSEAssembler
 	var codexBootstrap *codexBootstrapBuffer
-	if spec.ClientProtocol == protocol.OpenAIResponses && spec.RouteMode == execution.RouteNative {
+	var imageStream *codexResponsesImageStream
+	if responsesImage {
+		// 上游返回原始 Images SSE，不能经过文本 SDK 的逐行补帧和前导回收。
+		wire, item := newCodexResponsesImageResponse(spec.UpstreamModel)
+		imageStream = &codexResponsesImageStream{response: wire, item: item}
+	} else if spec.ClientProtocol == protocol.OpenAIResponses && spec.RouteMode == execution.RouteNative {
 		nativeResponsesAssembler = &nativeResponsesSSEAssembler{}
 		if provider.ProviderKind() == channel.ProviderCodex {
 			codexBootstrap = &codexBootstrapBuffer{}
@@ -411,7 +445,10 @@ func (a *Adapter) ExecuteStream(
 					return &failure
 				}
 			}
-			modelObserver.ObserveSSE(payload)
+			// 转换的生图事件只有合成模型，跳过不产生上游证据的图片解析。
+			if !responsesImage {
+				modelObserver.ObserveSSE(payload)
+			}
 			payload, rewriteErr := rewriteStreamModelAlias(spec, payload)
 			if rewriteErr != nil {
 				failure := streamInternalError(upstreamProtocol, headers, applied, "rewrite subscription response model", ready)
@@ -448,11 +485,16 @@ func (a *Adapter) ExecuteStream(
 			if failure := emitPayloads(codexBootstrap.flush()); failure != nil {
 				return *failure
 			}
-			return streamExecutionError(streamCtx, provider, upstreamProtocol, headers, idleErr, credential, applied, ready)
+			// Images 握手已返回，读取异常可能发生于生成期间，即使客户端还没收到前导。
+			return streamExecutionError(streamCtx, provider, upstreamProtocol, headers, idleErr, credential, applied, ready || imageStream != nil)
 		}
 		if !ok {
 			if err := context.Cause(streamCtx); err != nil {
 				return streamExecutionError(streamCtx, provider, upstreamProtocol, headers, err, credential, applied, ready)
+			}
+			if imageStream != nil {
+				// 部分图片或结束标记不能作为最终生成成功的证据。
+				return streamInternalError(upstreamProtocol, headers, applied, "Codex Images stream ended before completion", true)
 			}
 			if failure := emitPayloads(codexBootstrap.flush()); failure != nil {
 				return *failure
@@ -501,7 +543,7 @@ func (a *Adapter) ExecuteStream(
 			if failure := emitPayloads(codexBootstrap.flush()); failure != nil {
 				return *failure
 			}
-			return streamExecutionError(streamCtx, provider, upstreamProtocol, headers, chunk.Err, credential, applied, ready)
+			return streamExecutionError(streamCtx, provider, upstreamProtocol, headers, chunk.Err, credential, applied, ready || imageStream != nil)
 		}
 		incomplete = incomplete || chunk.Incomplete
 		if len(chunk.Payload) == 0 && nativeResponsesAssembler == nil {
@@ -520,7 +562,12 @@ func (a *Adapter) ExecuteStream(
 			}
 		}
 		payloads := [][]byte{chunk.Payload}
-		if nativeResponsesAssembler != nil {
+		if imageStream != nil {
+			payloads, err = imageStream.push(chunk.Payload)
+			if err != nil {
+				return streamInternalError(upstreamProtocol, headers, applied, err.Error(), true)
+			}
+		} else if nativeResponsesAssembler != nil {
 			payloads, err = nativeResponsesAssembler.push(chunk.Payload)
 			if err != nil {
 				return streamInternalError(upstreamProtocol, headers, applied, "invalid subscription SSE stream", ready)
@@ -528,6 +575,11 @@ func (a *Adapter) ExecuteStream(
 		}
 		if failure := emitPayloads(codexBootstrap.filter(payloads)); failure != nil {
 			return *failure
+		}
+		if imageStream != nil && imageStream.terminal {
+			// 成功或错误的终态已交给客户端方言判定，无需等待上游关闭或继续读取尾块。
+			// Images 未报告模型时，合成的客户端字段不作为上游观测。
+			return successfulStreamTerminal(upstreamProtocol, "", headers, applied)
 		}
 	}
 }
@@ -598,10 +650,11 @@ func resolvedTargetBaseURL(raw json.RawMessage) (string, error) {
 	return (subscriptionruntime.Target{Config: raw}).BaseURL()
 }
 
-// bridgeRequest copies an attempt into the provider-neutral CPA request shape
-// and performs the additional Images request normalization when required.
+// bridgeRequest 按已选路由构造 CPA 请求，独立持有上游请求体和头部。
+// Codex 的模型路由解析器只为受支持的生图型号声明 Responses 转换。
 func bridgeRequest(
 	spec execution.AttemptSpec,
+	providerKind channel.ProviderKind,
 	proxySettings cpaProxySettings,
 	baseURL string,
 	stream bool,
@@ -609,6 +662,25 @@ func bridgeRequest(
 	payload := append([]byte(nil), spec.Body...)
 	headers := spec.Header.Clone()
 	requestPath := ""
+	format := formatFor(spec.ClientProtocol)
+	if providerKind == channel.ProviderCodex && spec.ClientProtocol == protocol.OpenAIResponses &&
+		spec.Operation == execution.OperationResponsesCreate && spec.RouteMode == execution.RouteConverted {
+		if spec.Method != http.MethodPost || spec.Path != "/v1/responses" {
+			return providerRequest{}, errCodexImageConversionInput
+		}
+		var err error
+		payload, err = codexResponsesImagePayload(payload, spec.UpstreamModel, stream)
+		if err != nil {
+			return providerRequest{}, err
+		}
+		// 换请求体后移除原表示元数据，并选用 SDK 的原生 Images 路径。
+		requestPath, format = codexImagesGenerationPath, "openai-image"
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		platformheader.StripRepresentationMetadata(headers)
+		headers.Set("Content-Type", "application/json")
+	}
 	if spec.Operation == execution.OperationWebSearch {
 		if spec.Method != http.MethodPost || spec.Path != "/v1/alpha/search" || stream {
 			return providerRequest{}, fmt.Errorf("unsupported Codex search request")
@@ -642,7 +714,7 @@ func bridgeRequest(
 	}
 	return providerRequest{
 		AttemptID: spec.AttemptID, Model: spec.UpstreamModel, Payload: payload,
-		Format: formatFor(spec.ClientProtocol), RequestPath: requestPath, Headers: headers,
+		Format: format, RequestPath: requestPath, Headers: headers,
 		ConfiguredHeaders:    append([]string(nil), spec.ConfiguredHeaders...),
 		OriginalRequest:      append([]byte(nil), payload...),
 		ContinuityKey:        spec.ContinuityKey,
@@ -895,6 +967,10 @@ func modelAttemptPreparationEvidence(evidence *execution.ErrorEvidence) *executi
 }
 
 func requestValidationEvidence(err error) *execution.ErrorEvidence {
+	// 此错误来自单轮生图输入校验，属于请求级拒绝，不影响账号健康。
+	if errors.Is(err, errCodexImageConversionInput) {
+		return notSentEvidence(execution.ErrorKindInvalidRequest, errCodexImageConversionInput.Error(), execution.ErrorCodeCodexImageConversionInput)
+	}
 	var classified interface{ ConversionCode() string }
 	if errors.As(err, &classified) {
 		return notSentEvidence(execution.ErrorKindConversionUnsupported, "subscription request conversion is not supported", classified.ConversionCode())

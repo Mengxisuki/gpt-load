@@ -12,6 +12,7 @@ import (
 	"gpt-load/internal/channel"
 	"gpt-load/internal/execution"
 	"gpt-load/internal/health"
+	"gpt-load/internal/protocol"
 	subscriptionruntime "gpt-load/internal/subscription/runtime"
 )
 
@@ -115,6 +116,11 @@ func judgeUpstreamResult(
 		!errors.Is(result.Err, context.Canceled) &&
 		!errors.Is(result.Err, context.DeadlineExceeded) {
 		downstreamErr = nil
+	}
+	// 转换保留客户端的 Responses 操作，但实际派发的是生图。
+	// 评估重试时沿用 Images 的重放约束，结果不确定时不能再生成一张图。
+	if decisionContext.Operation == execution.OperationResponsesCreate && result.UpstreamProtocol == protocol.OpenAIImages {
+		decisionContext.Operation = execution.OperationImagesGenerate
 	}
 	decision := health.JudgeExecution(health.ExecutionAttempt{
 		DispatchState:       result.DispatchState,
